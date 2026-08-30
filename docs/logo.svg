@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <!-- Background Squircle Gradient -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3b82f6" />
+      <stop offset="50%" stop-color="#1d4ed8" />
+      <stop offset="100%" stop-color="#0f172a" />
+    </linearGradient>
+
+    <!-- Glass Overlay Gradient -->
+    <linearGradient id="glassSheen" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.25" />
+      <stop offset="60%" stop-color="#ffffff" stop-opacity="0.0" />
+    </linearGradient>
+
+    <!-- Lightning Bolt Gradient -->
+    <linearGradient id="boltGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="50%" stop-color="#22d3ee" />
+      <stop offset="100%" stop-color="#a855f7" />
+    </linearGradient>
+
+    <!-- Server Tray Gradient -->
+    <linearGradient id="trayGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.20" />
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0.05" />
+    </linearGradient>
+
+    <!-- Drop Shadow Filter -->
+    <filter id="dropShadow" x="-10%" y="-10%" width="120%" height="125%" filterUnits="userSpaceOnUse">
+      <feDropShadow dx="0" dy="16" stdDeviation="20" flood-color="#020617" flood-opacity="0.55" />
+    </filter>
+
+    <!-- Bolt Glow Filter -->
+    <filter id="neonGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- App Icon Base (Squircle) -->
+  <rect x="36" y="36" width="440" height="440" rx="100" fill="url(#bgGrad)" filter="url(#dropShadow)" />
+  
+  <!-- Subtle Inner Border -->
+  <rect x="36" y="36" width="440" height="440" rx="100" fill="none" stroke="#60a5fa" stroke-width="2" stroke-opacity="0.4" />
+
+  <!-- Top Glass Highlight -->
+  <path d="M 36 136 C 36 80.77 80.77 36 136 36 L 376 36 C 431.23 36 476 80.77 476 136 C 476 190 380 250 256 250 C 132 250 36 190 36 136 Z" fill="url(#glassSheen)" />
+
+  <!-- Server Stack Group -->
+  <g transform="translate(0, 0)">
+    <!-- Top Tray -->
+    <g>
+      <rect x="110" y="148" width="292" height="54" rx="16" fill="url(#trayGrad)" stroke="#93c5fd" stroke-width="2.5" stroke-opacity="0.35" />
+      <line x1="134" y1="175" x2="220" y2="175" stroke="#93c5fd" stroke-width="6" stroke-linecap="round" stroke-opacity="0.4" />
+      <circle cx="360" cy="175" r="5" fill="#38bdf8" />
+      <circle cx="380" cy="175" r="5" fill="#34d399" filter="url(#neonGlow)" />
+    </g>
+
+    <!-- Middle Tray -->
+    <g>
+      <rect x="110" y="228" width="292" height="54" rx="16" fill="url(#trayGrad)" stroke="#93c5fd" stroke-width="2.5" stroke-opacity="0.35" />
+      <line x1="134" y1="255" x2="200" y2="255" stroke="#93c5fd" stroke-width="6" stroke-linecap="round" stroke-opacity="0.4" />
+      <circle cx="360" cy="255" r="5" fill="#38bdf8" />
+      <circle cx="380" cy="255" r="5" fill="#34d399" filter="url(#neonGlow)" />
+    </g>
+
+    <!-- Bottom Tray -->
+    <g>
+      <rect x="110" y="308" width="292" height="54" rx="16" fill="url(#trayGrad)" stroke="#93c5fd" stroke-width="2.5" stroke-opacity="0.35" />
+      <line x1="134" y1="335" x2="220" y2="335" stroke="#93c5fd" stroke-width="6" stroke-linecap="round" stroke-opacity="0.4" />
+      <circle cx="340" cy="335" r="5" fill="#38bdf8" />
+      <circle cx="360" cy="335" r="5" fill="#38bdf8" />
+      <circle cx="380" cy="335" r="5" fill="#34d399" filter="url(#neonGlow)" />
+    </g>
+  </g>
+
+  <!-- Central Electric Lightning Bolt (Omni Speed & Power) -->
+  <g filter="url(#neonGlow)">
+    <polygon points="274,106 196,246 250,246 238,406 316,266 262,266" fill="url(#boltGrad)" stroke="#ffffff" stroke-width="3.5" stroke-linejoin="round" />
+  </g>
+</svg>
