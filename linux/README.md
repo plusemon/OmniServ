@@ -35,8 +35,8 @@ Or grab it straight from the terminal (bump the version to the latest release):
 
 ```bash
 cd /tmp
-wget https://github.com/plusemon/OmniServ/releases/download/v1.0.4/omniserv_1.0.4_all.deb
-sudo dpkg -i ./omniserv_1.0.4_all.deb
+wget https://github.com/plusemon/OmniServ/releases/download/v1.0.6/omniserv_1.0.6_all.deb
+sudo dpkg -i ./omniserv_1.0.6_all.deb
 sudo apt-get -f install -y
 ```
 
