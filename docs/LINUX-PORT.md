@@ -1,7 +1,7 @@
 # OmniServ for Linux / Ubuntu — Port Plan & Architecture Spec
 
 > Written **from the macOS codebase** as the build spec for the Linux version.
-> **Current as of macOS v1.7.4.** Get the code with `git clone https://github.com/wpexpertinbd/OmniServ`;
+> **Current as of macOS v1.7.4.** Get the code with `git clone https://github.com/plusemon/OmniServ`;
 > the Linux app lives in **`linux/`** — start with [`linux/README.md`](../linux/README.md) (kickoff +
 > WSL2 dev), then [`linux/engine/DELTAS.md`](../linux/engine/DELTAS.md) (the exact macOS→Linux engine
 > changes). Build/test on an actual Ubuntu box, a VM, or **WSL2** (Windows-Claude's path in).
@@ -199,7 +199,7 @@ installing the mkcert CA, and (Option B) `apt`/`systemctl`. Two mechanisms:
 ## 8. Build / dev workflow (Ubuntu)
 
 ```bash
-git clone https://github.com/wpexpertinbd/OmniServ
+git clone https://github.com/plusemon/OmniServ
 cd OmniServ/linux
 
 # engine works immediately (bash) once a pkg source is set up (Linuxbrew or apt):

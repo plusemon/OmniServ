@@ -892,13 +892,22 @@ cmd_self_update(){
   # dpkg-query in `var="$(…)"` would abort the function before our own error handling runs.
   cur="$(dpkg-query -W -f='${Version}' omniserv 2>/dev/null || true)"
   hdr "Checking for the latest OmniServ release…"
-  api="$(curl $_CURL_HTTPS -fsSL "https://api.github.com/repos/wpexpertinbd/OmniServ/releases?per_page=20" 2>/dev/null || true)"
-  [ -n "$api" ] || { no "couldn't reach GitHub (offline, or API rate-limited — retry shortly)"; return 1; }
-  case "$api" in *'rate limit'*) no "GitHub API rate limit hit — wait ~1 min and retry (or grab the .deb from the releases page)"; return 1 ;; esac
-  # Pin the host: escaped dots (github\.com, not github<any>com) so the asset URL can't be spoofed to
-  # a look-alike host in a tampered API body.
-  url="$(printf '%s\n' "$api" | grep -oE 'https://github\.com/[^"]*omniserv_[0-9.]+_all\.deb' | head -1 || true)"
-  [ -n "$url" ] || { no "no Linux .deb asset found in the latest releases"; return 1; }
+  api="$(curl $_CURL_HTTPS -fsSL "https://api.github.com/repos/plusemon/OmniServ/releases?per_page=20" 2>/dev/null || true)"
+  if [ -z "$api" ] || case "$api" in *'rate limit'*) true ;; *) false ;; esac; then
+    # Fallback to releases/latest web redirect if GitHub API rate limits or fails
+    local red_url tag
+    red_url="$(curl $_CURL_HTTPS -s -o /dev/null -w '%{url_effective}' -L "https://github.com/plusemon/OmniServ/releases/latest" 2>/dev/null || true)"
+    tag="$(printf '%s' "$red_url" | sed -E 's#.*/tag/([^/?#]+).*#\1#')"
+    if [ -n "$tag" ] && [ "$tag" != "$red_url" ]; then
+      local tag_ver="${tag#linux-v}"
+      tag_ver="${tag_ver#linux-}"
+      tag_ver="${tag_ver#v}"
+      url="https://github.com/plusemon/OmniServ/releases/download/${tag}/omniserv_${tag_ver}_all.deb"
+    fi
+  else
+    url="$(printf '%s\n' "$api" | grep -oE 'https://github\.com/[^"]*omniserv_[0-9.]+_all\.deb' | head -1 || true)"
+  fi
+  [ -n "$url" ] || { no "couldn't reach GitHub or find release (offline, or API rate-limited — retry shortly)"; return 1; }
   # Belt-and-suspenders host allowlist before we hand the URL to curl.
   case "$url" in https://github.com/*) ;; *) no "refusing non-GitHub download URL"; return 1 ;; esac
   latest="$(printf '%s' "$url" | sed -E 's#.*omniserv_([0-9.]+)_all\.deb#\1#' || true)"

@@ -4,7 +4,9 @@
 ; click "More info -> Run anyway" on SmartScreen (the Windows analog of macOS "Open Anyway").
 
 #define MyAppName "OmniServ"
+#ifndef MyAppVersion
 #define MyAppVersion "1.0.70"
+#endif
 #define MyAppPublisher "Emon Khan"
 #define MyAppExe "OmniServ.App.exe"
 #define MyAppURL "https://emon.bd"
@@ -15,8 +17,8 @@ AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
-AppSupportURL=https://github.com/wpexpertinbd/OmniServ
-AppUpdatesURL=https://github.com/wpexpertinbd/OmniServ/releases
+AppSupportURL=https://github.com/plusemon/OmniServ
+AppUpdatesURL=https://github.com/plusemon/OmniServ/releases
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes

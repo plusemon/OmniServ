@@ -12,7 +12,7 @@ OUT="${1:?usage: build-repo.sh <output_dir> <deb> [deb ...]}"; shift
 [ $# -ge 1 ] || { echo "error: no .deb files given" >&2; exit 1; }
 
 # The repo's canonical public URL (where GitHub Pages serves this directory).
-PAGES_URL="${OMNISERV_PAGES_URL:-https://wpexpertinbd.github.io/OmniServ}"
+PAGES_URL="${OMNISERV_PAGES_URL:-https://plusemon.github.io/OmniServ}"
 
 KEYID="$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/{print $5; exit}')"
 [ -n "$KEYID" ] || { echo "error: no secret signing key found in the gpg keyring" >&2; exit 1; }
@@ -29,7 +29,7 @@ Codename: stable
 Suite: stable
 Architectures: amd64 arm64
 Components: main
-Description: OmniServ — free local web server stack (https://github.com/wpexpertinbd/OmniServ)
+Description: OmniServ — free local web server stack (https://github.com/plusemon/OmniServ)
 SignWith: $KEYID
 EOF
 
@@ -69,7 +69,7 @@ sudo apt update && sudo apt install omniserv</pre>
 <h2>Update</h2>
 <pre>sudo apt update && sudo apt upgrade omniserv</pre>
 <p>Works on any Debian/Ubuntu (the package is architecture-independent).
-Source &amp; releases: <a href="https://github.com/wpexpertinbd/OmniServ">github.com/wpexpertinbd/OmniServ</a>.</p>
+Source &amp; releases: <a href="https://github.com/plusemon/OmniServ">github.com/plusemon/OmniServ</a>.</p>
 </body></html>
 HTML
 

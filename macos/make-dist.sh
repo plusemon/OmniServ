@@ -5,13 +5,13 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 APP_NAME="OmniServ"
-VERSION="1.7.16"          # keep in sync with build-app.sh
+VERSION="${1:-${VERSION:-1.0.3}}"          # keep in sync with build-app.sh
 IDENT="com.emon.omniserv"
 DIST="dist"
 APP="$DIST/$APP_NAME.app"
 
 echo "▶ building app..."
-./build-app.sh >/dev/null
+./build-app.sh "$VERSION" >/dev/null
 echo "✓ $APP"
 
 # ── DMG (drag OmniServ.app → Applications) ────────────────────────────────────
@@ -79,7 +79,7 @@ cat > "$PKGTMP/res/conclusion.html" <<HTML
   <h1>OmniServ is installed 🎉</h1>
   <p>Find <b>OmniServ</b> in your Applications folder or Launchpad. It lives in the menu bar — open it to add sites, start services, and manage databases.</p>
   <p class="note"><b>First launch:</b> macOS may say the app is from an “unidentified developer” (it isn't notarized — that needs a paid Apple account). Right-click the app → <b>Open</b>, or go to <b>System Settings ▸ Privacy &amp; Security ▸ Open Anyway</b>. You only do this once.</p>
-  <p>Free &amp; open-source: <b>github.com/wpexpertinbd/OmniServ</b> — thank you for using OmniServ!</p>
+  <p>Free &amp; open-source: <b>github.com/plusemon/OmniServ</b> — thank you for using OmniServ!</p>
 </body></html>
 HTML
 

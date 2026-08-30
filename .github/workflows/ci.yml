@@ -1,0 +1,147 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint & Code Quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Linting Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          pip install --upgrade pip pyyaml
+
+      - name: Validate Shell Script Syntax
+        run: |
+          bash -n engine/omniserv
+          bash -n engine/platform-linux.sh
+          bash -n linux/build.sh
+          bash -n linux/apt-repo/build-repo.sh
+          bash -n macos/build-app.sh
+          bash -n macos/make-dist.sh
+          echo "All shell scripts passed syntax checks."
+
+      - name: Run ShellCheck
+        run: |
+          shellcheck -S warning -e SC1091,SC2034,SC2154 engine/omniserv engine/platform-linux.sh linux/build.sh || true
+
+      - name: Validate Python Syntax
+        run: |
+          python3 -m py_compile $(find linux/app -name "*.py")
+          echo "All Python source files compiled successfully."
+
+      - name: Validate Workflow YAML Files
+        run: |
+          python3 -c "import yaml, glob; [yaml.safe_load(open(f, 'r', encoding='utf-8')) for f in glob.glob('.github/**/*.yml', recursive=True)]; print('All YAML files are valid.')"
+
+  build-linux:
+    name: Build Linux (.deb)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev binutils
+
+      - name: Build Debian Package
+        run: |
+          chmod +x linux/build.sh engine/omniserv engine/platform-linux.sh
+          ./linux/build.sh
+
+      - name: Inspect Package
+        run: |
+          ls -lh linux/dist/
+          DEB_FILE=$(find linux/dist -name "*.deb" | head -n 1)
+          dpkg-deb --info "$DEB_FILE"
+          dpkg-deb --contents "$DEB_FILE"
+
+      - name: Upload Linux Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: omniserv-linux-deb
+          path: linux/dist/*.deb
+          if-no-files-found: error
+
+  build-macos:
+    name: Build macOS (.dmg & .pkg)
+    runs-on: macos-14
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Display Swift & Xcode Version
+        run: |
+          swift --version
+          xcodebuild -version
+
+      - name: Build macOS App and Distributables
+        run: |
+          chmod +x macos/build-app.sh macos/make-dist.sh engine/omniserv
+          ./macos/make-dist.sh
+
+      - name: Inspect Distributables
+        run: |
+          ls -lh macos/dist/
+
+      - name: Upload macOS Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: omniserv-macos-dist
+          path: |
+            macos/dist/*.dmg
+            macos/dist/*.pkg
+          if-no-files-found: error
+
+  build-windows:
+    name: Build Windows (Installer)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress
+
+      - name: Build OmniServ Windows Installer
+        shell: powershell
+        run: |
+          powershell -ExecutionPolicy Bypass -File windows/build.ps1
+
+      - name: Inspect Output
+        shell: powershell
+        run: |
+          Get-ChildItem -Path windows\installer\dist -Filter *.exe
+
+      - name: Upload Windows Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: omniserv-windows-installer
+          path: windows/installer/dist/*.exe
+          if-no-files-found: error

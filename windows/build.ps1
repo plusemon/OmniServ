@@ -17,20 +17,22 @@ param(
     [string]$CertPath = "",          # path to a .pfx code-signing cert (or use -CertSubject for an installed cert)
     [string]$CertPassword = "",
     [string]$CertSubject = "",       # alternatively, the subject name of a cert in the Windows store
-    [string]$TimestampUrl = "http://timestamp.sectigo.com"
+    [string]$TimestampUrl = "http://timestamp.sectigo.com",
+    [string]$Version = ""
 )
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
-# ── version: the installer .iss is the SINGLE SOURCE OF TRUTH ─────────────────────
-# Stamp the SAME version onto the published assemblies (-p:Version). The in-app updater
-# reads the assembly version (GetExecutingAssembly().GetName().Version); if it isn't bumped
-# in lockstep with the installer, the app self-reports a stale version and offers the update
-# FOREVER (the 1.0.31-vs-latest loop). Deriving both from the .iss makes drift impossible.
-$issText = Get-Content (Join-Path $PSScriptRoot "installer\omniserv.iss") -Raw
-$ver = [regex]::Match($issText, '#define\s+MyAppVersion\s+"([0-9]+\.[0-9]+\.[0-9]+)"').Groups[1].Value
-if (-not $ver) { throw "could not read MyAppVersion from installer\omniserv.iss" }
-Write-Host "build  version $ver (from omniserv.iss)" -ForegroundColor Cyan
+# ── version: use passed Version or extract from the installer .iss ─────────────
+if ($Version) {
+    $ver = $Version
+    Write-Host "build  version $ver (from parameter)" -ForegroundColor Cyan
+} else {
+    $issText = Get-Content (Join-Path $PSScriptRoot "installer\omniserv.iss") -Raw
+    $ver = [regex]::Match($issText, '#define\s+MyAppVersion\s+"([0-9]+\.[0-9]+\.[0-9]+)"').Groups[1].Value
+    if (-not $ver) { throw "could not read MyAppVersion from installer\omniserv.iss" }
+    Write-Host "build  version $ver (from omniserv.iss)" -ForegroundColor Cyan
+}
 
 # ── publish the three exes self-contained ───────────────────────────────────────
 Write-Host "build  publishing app + cli + elevate ($Rid)..." -ForegroundColor Cyan
@@ -115,7 +117,7 @@ if (-not $iscc) {
 }
 # Pass /DBundle=1 to Inno when a payload exists so it ships {app}\bin.
 $bundleDef = if ($Bundle -and (Test-Path $payloadBin)) { @("/DBundle=1") } else { @() }
-& $iscc @bundleDef "installer\omniserv.iss"
+& $iscc @bundleDef "/DMyAppVersion=$ver" "installer\omniserv.iss"
 
 # Sign the installer itself (last, so the file users download is trusted).
 $setup = Get-ChildItem (Join-Path $PSScriptRoot "installer\dist") -Filter *.exe -ErrorAction SilentlyContinue |

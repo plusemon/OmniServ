@@ -4,7 +4,7 @@
 > the **Windows installer release** without disturbing the macOS app or its in-app
 > updater. Read this with `docs/WINDOWS-PORT.md` (build) and `docs/MAC-FEATURE-REFERENCE.md` (parity).
 
-OmniServ is a **single monorepo** (`github.com/wpexpertinbd/OmniServ`) holding macOS,
+OmniServ is a **single monorepo** (`github.com/plusemon/OmniServ`) holding macOS,
 Windows, and (later) Linux. **Do not create a separate repo.** The Windows app lives
 under `windows/`; the Mac app under `macos/` + `engine/`.
 
@@ -91,7 +91,7 @@ Because Windows ships as a **pre-release** for now, the updater must NOT use `re
 (that returns the Mac stable). Instead query **all releases** and pick the newest **`win-*`** tag:
 
 ```
-GET https://api.github.com/repos/wpexpertinbd/OmniServ/releases
+GET https://api.github.com/repos/plusemon/OmniServ/releases
 → filter tag_name starts with "win-v"
 → take the highest version, find the asset ending ".exe"
 → if newer than this build's Version → offer download+run (then exit so the installer can replace it)

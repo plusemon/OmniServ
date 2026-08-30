@@ -16,7 +16,7 @@ namespace OmniServ.App.Services;
 /// </summary>
 public static class Updater
 {
-    private const string Repo = "wpexpertinbd/OmniServ";
+    private const string Repo = "plusemon/OmniServ";
 
     public static string CurrentVersion =>
         Assembly.GetExecutingAssembly().GetName().Version is { } v ? $"{v.Major}.{v.Minor}.{v.Build}" : "0.0.0";
@@ -56,15 +56,20 @@ public static class Updater
         catch { }
     }
 
+    private static string StripTag(string tag)
+    {
+        if (tag.StartsWith("win-v", StringComparison.OrdinalIgnoreCase)) return tag["win-v".Length..];
+        if (tag.StartsWith("win-", StringComparison.OrdinalIgnoreCase)) return tag["win-".Length..];
+        if (tag.StartsWith("v", StringComparison.OrdinalIgnoreCase)) return tag[1..];
+        return tag;
+    }
+
     public static async Task<Result> Check()
     {
         try
         {
             using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
             http.DefaultRequestHeaders.UserAgent.ParseAdd("OmniServ-Updater");
-            // IMPORTANT: read ALL releases and filter the Windows channel (win-v* tags).
-            // NOT /releases/latest — that is the macOS .pkg channel and would mis-report
-            // the Mac version as a Windows update.
             using var doc = JsonDocument.Parse(
                 await http.GetStringAsync($"https://api.github.com/repos/{Repo}/releases?per_page=50"));
 
@@ -72,15 +77,21 @@ public static class Updater
             foreach (var rel in doc.RootElement.EnumerateArray())
             {
                 var tag = rel.GetProperty("tag_name").GetString() ?? "";
-                if (!tag.StartsWith("win-v", StringComparison.OrdinalIgnoreCase)) continue;
-                var ver = tag["win-v".Length..];
-                if (bestVer is not null && Compare(ver, bestVer) <= 0) continue;
+                if (tag.StartsWith("linux-", StringComparison.OrdinalIgnoreCase) ||
+                    tag.StartsWith("mac-", StringComparison.OrdinalIgnoreCase) ||
+                    tag.StartsWith("darwin-", StringComparison.OrdinalIgnoreCase))
+                    continue;
 
                 var exe = rel.TryGetProperty("assets", out var assets)
                     ? assets.EnumerateArray()
                             .Select(a => a.GetProperty("browser_download_url").GetString())
                             .FirstOrDefault(u => u is not null && u.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
                     : null;
+
+                if (exe is null && !tag.StartsWith("win-", StringComparison.OrdinalIgnoreCase)) continue;
+
+                var ver = StripTag(tag);
+                if (bestVer is not null && Compare(ver, bestVer) <= 0) continue;
                 bestVer = ver; bestAsset = exe;
                 bestNotes = rel.TryGetProperty("body", out var b) ? b.GetString() : null;
             }

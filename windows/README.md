@@ -27,7 +27,7 @@ windows/
 ## Develop
 
 ```powershell
-git clone https://github.com/wpexpertinbd/OmniServ
+git clone https://github.com/plusemon/OmniServ
 cd OmniServ\windows
 dotnet build OmniServ.sln
 dotnet run --project src\OmniServ.Cli -- init      # try the CLI

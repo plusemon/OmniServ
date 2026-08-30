@@ -205,4 +205,4 @@ omniserv secure <name>.test
 ```
 
 Stuck on a specific stack? Open an issue at
-<https://github.com/wpexpertinbd/OmniServ/issues> with your source stack and the error.
+<https://github.com/plusemon/OmniServ/issues> with your source stack and the error.

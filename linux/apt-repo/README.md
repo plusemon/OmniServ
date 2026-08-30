@@ -5,9 +5,9 @@ A GPG-signed apt repository hosted on **GitHub Pages**, so Debian/Ubuntu users c
 
 ```bash
 # 1. add the signing key
-curl -fsSL https://wpexpertinbd.github.io/OmniServ/omniserv.gpg | sudo gpg --dearmor -o /usr/share/keyrings/omniserv.gpg
+curl -fsSL https://plusemon.github.io/OmniServ/omniserv.gpg | sudo gpg --dearmor -o /usr/share/keyrings/omniserv.gpg
 # 2. add the repository
-echo "deb [signed-by=/usr/share/keyrings/omniserv.gpg] https://wpexpertinbd.github.io/OmniServ stable main" \
+echo "deb [signed-by=/usr/share/keyrings/omniserv.gpg] https://plusemon.github.io/OmniServ stable main" \
   | sudo tee /etc/apt/sources.list.d/omniserv.list
 # 3. install + update like any package
 sudo apt update && sudo apt install omniserv
@@ -69,8 +69,7 @@ GitHub → repo **Settings → Pages → Build and deployment → Source: GitHub
 
 ### 4. Publish the repo the first time
 GitHub → **Actions → “Publish apt repo” → Run workflow** (manual `workflow_dispatch`). After it
-finishes, the repo is live at `https://wpexpertinbd.github.io/OmniServ/` and every future `linux-v*`
-release re-publishes it automatically.
+finishes, the repo is live at `https://plusemon.github.io/OmniServ/` and every future release re-publishes it automatically.
 
 > The user-facing key (`omniserv.gpg`) is **derived from** the signing key and published automatically —
 > you never commit any key material to the repo.

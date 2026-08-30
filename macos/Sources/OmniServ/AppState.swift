@@ -447,7 +447,7 @@ final class AppState {
     }
 
     // ── self-update via GitHub Releases ─────────────────────────────────────
-    static let repoSlug = "wpexpertinbd/OmniServ"
+    static let repoSlug = "plusemon/OmniServ"
     enum UpdateStatus: Equatable {
         case idle, checking, working, upToDate
         case available(version: String, pkg: String)

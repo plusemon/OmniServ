@@ -16,8 +16,8 @@ OpenLiteSpeed**, MariaDB / MySQL / PostgreSQL, Redis & Memcached, Node & Python 
 
 ## Install
 
-**1. Download the latest `.deb`** from the [**Releases** page](https://github.com/wpexpertinbd/OmniServ/releases)
-(the newest **`linux-vX.Y.Z`** release → `omniserv_X.Y.Z_all.deb`), then install it:
+**1. Download the latest `.deb`** from the [**Releases** page](https://github.com/plusemon/OmniServ/releases)
+(the newest **`vX.Y.Z`** release → `omniserv_X.Y.Z_all.deb`), then install it:
 
 ```bash
 cd ~/Downloads     # wherever the .deb downloaded
@@ -29,8 +29,8 @@ Or grab it straight from the terminal (bump the version to the latest release):
 
 ```bash
 cd /tmp
-wget https://github.com/wpexpertinbd/OmniServ/releases/download/linux-v1.0.37/omniserv_1.0.37_all.deb
-sudo dpkg -i ./omniserv_1.0.37_all.deb
+wget https://github.com/plusemon/OmniServ/releases/download/v1.0.3/omniserv_1.0.3_all.deb
+sudo dpkg -i ./omniserv_1.0.3_all.deb
 sudo apt-get -f install -y
 ```
 

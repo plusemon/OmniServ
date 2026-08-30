@@ -9,7 +9,7 @@
 <p>A free alternative to ServBay · Herd · Laragon — with multi-PHP, nginx/Apache/OpenLiteSpeed, databases, caching, trusted HTTPS, one-click WordPress, Node &amp; Python apps, and public sharing via Cloudflare Tunnel.</p>
 
 <p>
-  <a href="https://github.com/wpexpertinbd/OmniServ/releases"><img src="https://img.shields.io/github/v/release/wpexpertinbd/OmniServ?style=flat-square&label=latest&color=4f46e5" alt="Latest Release"></a>
+  <a href="https://github.com/plusemon/OmniServ/releases"><img src="https://img.shields.io/github/v/release/plusemon/OmniServ?style=flat-square&label=latest&color=4f46e5" alt="Latest Release"></a>
   <img src="https://img.shields.io/badge/license-MIT-22c55e?style=flat-square" alt="License">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon%20%2B%20Intel-black?style=flat-square&logo=apple" alt="macOS">
   <img src="https://img.shields.io/badge/Windows-10%2F11-0078d4?style=flat-square&logo=windows" alt="Windows">
@@ -17,7 +17,7 @@
 </p>
 
 <p>
-  <a href="https://github.com/wpexpertinbd/OmniServ/releases"><strong>⬇️ Download</strong></a> ·
+  <a href="https://github.com/plusemon/OmniServ/releases"><strong>⬇️ Download</strong></a> ·
   <a href="#-quick-start"><strong>🚀 Quick Start</strong></a> ·
   <a href="docs/MIGRATING.md"><strong>📦 Migrate</strong></a> ·
   <a href="docs/ROADMAP.md"><strong>🗺️ Roadmap</strong></a>
@@ -88,7 +88,7 @@
 
 ## ⬇️ Download & Install
 
-Grab the latest build from the [**Releases**](https://github.com/wpexpertinbd/OmniServ/releases) page.
+Grab the latest build from the [**Releases**](https://github.com/plusemon/OmniServ/releases) page.
 
 > [!IMPORTANT]
 > OmniServ owns ports **80 / 443** and the `*.test` domain. Quit any other local stack (ServBay / Herd / Laragon / XAMPP) before the first run.

@@ -21,7 +21,7 @@ public static class Downloader
     // as a "dropper" — without bundling and without a code-signing certificate.
     private static string CurlExe => Path.Combine(Environment.SystemDirectory, "curl.exe");
     private static string TarExe  => Path.Combine(Environment.SystemDirectory, "tar.exe");
-    private const string UA = "OmniServ/0.1 (+https://github.com/wpexpertinbd/OmniServ)";
+    private const string UA = "OmniServ/0.1 (+https://github.com/plusemon/OmniServ)";
 
     // ArgumentList (not a single string) so every arg is escaped by the runtime — a URL or path
     // can never break out and inject extra curl/tar flags.
@@ -614,6 +614,6 @@ public static class Downloader
 
     static Downloader()
     {
-        Http.DefaultRequestHeaders.UserAgent.ParseAdd("OmniServ/0.1 (+https://github.com/wpexpertinbd/OmniServ)");
+        Http.DefaultRequestHeaders.UserAgent.ParseAdd("OmniServ/0.1 (+https://github.com/plusemon/OmniServ)");
     }
 }

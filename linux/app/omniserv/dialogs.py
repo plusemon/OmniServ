@@ -110,9 +110,13 @@ def check_updates(win, force: bool = False) -> None:
         return
 
     def worker():
-        rel = updater.check(force=force)
+        local_v = getattr(win, "app_version", None)
+        rel, err = (updater.check(force=force, local_ver=local_v) if local_v
+                    else updater.check(force=force))
         if rel:
             GLib.idle_add(offer_update, win, rel)
+        elif err and force:
+            GLib.idle_add(win.toast, f"Update check failed: {err}")
         elif force:
             GLib.idle_add(win.toast, "You're on the latest version.")
     threading.Thread(target=worker, daemon=True).start()
@@ -240,24 +244,56 @@ def add_site_dialog(win, default_type: str = "wordpress") -> None:
 
 
 def run_add_site(win, nm: str, args: list[str], do_secure: bool, tld: str) -> None:
-    win.toast(f"Creating {nm}…")
+    """Creates a site with a modal progress dialog so the user gets clear visual feedback."""
     win._applog(f"Creating {nm}…")
     win.spinner.start()
 
-    def finish(ok, output):
+    # ── progress dialog: stays up the whole time, can't be dismissed early ──
+    dlg = Adw.MessageDialog(transient_for=win,
+                            heading=f"Creating {nm}…",
+                            body="Setting up vhost, folder, and TLS certificate. This may take a moment.")
+    prog_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin_top=8)
+    bar = Gtk.ProgressBar(show_text=False)
+    status_lbl = Gtk.Label(label="Working…", xalign=0, wrap=True, css_classes=["dim-label"])
+    prog_box.append(bar)
+    prog_box.append(status_lbl)
+    dlg.set_extra_child(prog_box)
+    dlg.add_response("close", "Close")
+    dlg.set_response_enabled("close", False)   # disabled until the job finishes
+    dlg.set_close_response("close")
+    dlg.connect("response", lambda d, r: win.refresh())
+    pulse_src = GLib.timeout_add(110, lambda: (bar.pulse() or True))
+    dlg.present()
+
+    def finish(ok: bool, output: str) -> None:
+        GLib.source_remove(pulse_src)
         win.spinner.stop()
+        bar.set_fraction(1.0)
+        status_lbl.remove_css_class("dim-label")
+        if ok:
+            status_lbl.set_label("✓ Site created successfully")
+            status_lbl.add_css_class("success")
+            win._applog(f"✓ {nm} created")
+        else:
+            err = _first_line(output) or f"Creating {nm} failed"
+            status_lbl.set_label(f"✗ {err}")
+            status_lbl.add_css_class("error")
+            win._applog(f"✗ {err}")
+        dlg.set_response_enabled("close", True)
+        # Close the progress dialog and open the result summary
+        dlg.close()
         win.refresh()
-        win._applog(f"{'✓' if ok else '✗'} {nm} " + ("created" if ok else "failed"))
         site_result_dialog(win, ok, output, nm, tld)
 
-    def after_add(rc, out):
+    def after_add(rc: int, out: str) -> None:
         if rc != 0:
-            finish(False, out)
+            GLib.idle_add(finish, False, out)
         elif do_secure:
+            GLib.idle_add(status_lbl.set_label, "Securing with mkcert…")
             win.engine.run_async(["secure", f"{nm}.{tld}"],
-                                  lambda rc2, out2: finish(True, out + "\n" + out2))
+                                 lambda rc2, out2: GLib.idle_add(finish, True, out + "\n" + out2))
         else:
-            finish(True, out)
+            GLib.idle_add(finish, True, out)
 
     win.engine.run_async(list(args), after_add)
 

@@ -3,7 +3,7 @@
 > This document is written **from the macOS codebase** as the build spec for the
 > Windows version. Do the actual build **on a Windows machine** (you cannot build
 > or test WinUI 3, Windows services, the hosts file, or an MSI from macOS).
-> Get the code with `git clone https://github.com/wpexpertinbd/OmniServ` — don't
+> Get the code with `git clone https://github.com/plusemon/OmniServ` — don't
 > copy the folder over USB. The Windows app lives in `windows/` in this repo.
 
 OmniServ (mac) = a self-contained, free local web-server stack — a ServBay/Herd
@@ -132,8 +132,8 @@ equivalent of the password-less sudoers helper).
 
 ```powershell
 # prerequisites: Visual Studio 2022 (or build tools) + .NET 8 SDK + Windows App SDK
-git clone https://github.com/wpexpertinbd/OmniServ
-cd OmniServ\windows
+git clone https://github.com/plusemon/OmniServ
+cd OmniServ/windows
 dotnet build OmniServ.sln
 dotnet run --project src\OmniServ.App     # launch the GUI
 dotnet run --project src\OmniServ.Cli -- status   # the CLI
