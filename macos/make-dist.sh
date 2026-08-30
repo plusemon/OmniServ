@@ -11,7 +11,7 @@ DIST="dist"
 APP="$DIST/$APP_NAME.app"
 
 echo "▶ building app..."
-./build-app.sh "$VERSION" >/dev/null
+./build-app.sh "$VERSION"
 echo "✓ $APP"
 
 # ── DMG (drag OmniServ.app → Applications) ────────────────────────────────────
@@ -22,7 +22,7 @@ cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
 DMG="$DIST/$APP_NAME-$VERSION.dmg"
 rm -f "$DMG"
-hdiutil create -volname "$APP_NAME" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
+hdiutil create -volname "$APP_NAME" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
 rm -rf "$STAGE"
 echo "✓ $DMG ($(du -h "$DMG" | cut -f1))"
 
@@ -37,7 +37,7 @@ rm -rf "$PKGTMP"; mkdir -p "$PKGTMP/res"
 # component package (the actual payload)
 pkgbuild --root "$PKGROOT" --install-location / \
   --identifier "$IDENT" --version "$VERSION" --ownership recommended \
-  "$PKGTMP/component.pkg" >/dev/null
+  "$PKGTMP/component.pkg"
 
 # branded Welcome + Conclusion screens (Emon Khan — brand blue #0d6efd)
 cat > "$PKGTMP/res/welcome.html" <<HTML
@@ -99,7 +99,7 @@ XML
 PKG="$DIST/$APP_NAME-$VERSION.pkg"
 rm -f "$PKG"
 productbuild --distribution "$PKGTMP/distribution.xml" \
-  --resources "$PKGTMP/res" --package-path "$PKGTMP" "$PKG" >/dev/null
+  --resources "$PKGTMP/res" --package-path "$PKGTMP" "$PKG"
 rm -rf "$PKGROOT" "$PKGTMP"
 echo "✓ $PKG ($(du -h "$PKG" | cut -f1))  (branded installer)"
 

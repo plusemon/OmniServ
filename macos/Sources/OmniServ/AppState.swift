@@ -353,11 +353,12 @@ final class AppState {
 
         busy = true; lastAction = "saving settings…"; defer { busy = false; lastAction = nil }
         let eng = engine
-        let needsRestart = changes.contains { ["tld", "http_port", "https_port"].contains($0.0) }
+        let changeList = changes
+        let needsRestart = changeList.contains { ["tld", "http_port", "https_port"].contains($0.0) }
         let nginxUp = snapshot?.services.contains { $0.key == "nginx" && $0.running } ?? false
         do {
             try await Task.detached {
-                for (k, v) in changes { _ = try eng.run(["config", "set", k, v]) }
+                for (k, v) in changeList { _ = try eng.run(["config", "set", k, v]) }
                 if needsRestart && nginxUp { try eng.runPrivileged(["restart", "nginx"]) }
             }.value
             await reload()

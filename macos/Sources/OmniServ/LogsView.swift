@@ -1,5 +1,6 @@
 import SwiftUI
 
+@MainActor
 struct LogsView: View {
     @Environment(AppState.self) private var state
     @State private var selected = ""

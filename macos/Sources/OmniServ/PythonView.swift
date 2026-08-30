@@ -1,5 +1,6 @@
 import SwiftUI
 
+@MainActor
 struct PythonView: View {
     @Environment(AppState.self) private var state
     @State private var addingApp = false
@@ -57,6 +58,7 @@ struct PythonView: View {
 }
 
 /// Dedicated "Add Python app" sheet (parallel to AddNodeAppSheet).
+@MainActor
 struct AddPythonAppSheet: View {
     @Environment(AppState.self) private var state
     @Environment(\.dismiss) private var dismiss

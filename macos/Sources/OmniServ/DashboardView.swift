@@ -1,5 +1,6 @@
 import SwiftUI
 
+@MainActor
 struct DashboardView: View {
     @Environment(AppState.self) private var state
 
@@ -60,6 +61,7 @@ struct DashboardView: View {
 
 /// Owns the Metrics dependency so the live 2s sampling only re-renders these
 /// three cards — not the websites list (which was making the search box "dance").
+@MainActor
 struct SystemMetricsGrid: View {
     @Environment(Metrics.self) private var metrics
     let cols: [GridItem]
@@ -81,6 +83,7 @@ struct SystemMetricsGrid: View {
 }
 
 /// Live network throughput (↓ down / ↑ up) — the 4th system-resource card.
+@MainActor
 struct NetworkCard: View {
     @Environment(Metrics.self) private var metrics
     var body: some View {
@@ -109,6 +112,7 @@ struct NetworkCard: View {
 }
 
 /// Single Cache card listing each installed engine (Redis / Memcached) + status.
+@MainActor
 struct CacheCard: View {
     let caches: [Service]
     private var anyRunning: Bool { caches.contains { $0.running } }
@@ -142,6 +146,7 @@ struct CacheCard: View {
     }
 }
 
+@MainActor
 struct StatusCard: View {
     let title: String, icon: String, value: String, sub: String, on: Bool
     var body: some View {
@@ -162,6 +167,7 @@ struct StatusCard: View {
     }
 }
 
+@MainActor
 struct CPUCard: View {
     @Environment(Metrics.self) private var metrics
     var body: some View {
@@ -184,6 +190,7 @@ struct CPUCard: View {
     private var cpuColor: Color { metrics.cpu > 80 ? .red : metrics.cpu > 50 ? .orange : .green }
 }
 
+@MainActor
 struct MetricCard: View {
     let title: String, icon: String, percent: Double, detail: String, tint: Color
     var body: some View {
@@ -206,6 +213,7 @@ struct MetricCard: View {
 }
 
 /// Lightweight line sparkline (no Charts dependency).
+@MainActor
 struct Sparkline: View {
     let values: [Double]
     let maxValue: Double

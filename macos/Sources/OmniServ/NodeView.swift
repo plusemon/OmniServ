@@ -1,5 +1,6 @@
 import SwiftUI
 
+@MainActor
 struct NodeView: View {
     @Environment(AppState.self) private var state
     @State private var version = ""
@@ -76,6 +77,7 @@ struct NodeView: View {
     }
 }
 
+@MainActor
 struct NodeRow: View {
     @Environment(AppState.self) private var state
     let node: NodeVersion

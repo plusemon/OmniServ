@@ -138,12 +138,12 @@ public sealed partial class NodePage : Page
         if ((s as FrameworkElement)?.Tag is string url)
             try { Process.Start(new ProcessStartInfo { FileName = url, UseShellExecute = true }); } catch { }
     }
-    // Tag(s) reads a UI element — capture it on the UI thread, never inside the engine lambda.
-    private async void StartApp_Click(object s, RoutedEventArgs e)  { var n = Tag(s); await AppOp(() => EngineHost.Instance.Engine.NodeSiteStart(n)); }
-    private async void StopApp_Click(object s, RoutedEventArgs e)   { var n = Tag(s); await AppOp(() => EngineHost.Instance.Engine.NodeSiteStop(n)); }
-    private async void RemoveApp_Click(object s, RoutedEventArgs e) { var n = Tag(s); await AppOp(() => EngineHost.Instance.Engine.NodeSiteRemove(n)); }
+    // GetTag(s) reads a UI element — capture it on the UI thread, never inside the engine lambda.
+    private async void StartApp_Click(object s, RoutedEventArgs e)  { var n = GetTag(s); await AppOp(() => EngineHost.Instance.Engine.NodeSiteStart(n)); }
+    private async void StopApp_Click(object s, RoutedEventArgs e)   { var n = GetTag(s); await AppOp(() => EngineHost.Instance.Engine.NodeSiteStop(n)); }
+    private async void RemoveApp_Click(object s, RoutedEventArgs e) { var n = GetTag(s); await AppOp(() => EngineHost.Instance.Engine.NodeSiteRemove(n)); }
 
-    private static string Tag(object s) => (s as FrameworkElement)?.Tag as string ?? "";
+    private static string GetTag(object s) => (s as FrameworkElement)?.Tag as string ?? "";
 
     private static Grid WithBrowse(TextBox box)
     {
@@ -192,18 +192,18 @@ public sealed partial class NodePage : Page
     }
 
     // ── per-app extras (⋯ menu) ──────────────────────────────────────────────────
-    private async void RestartApp_Click(object s, RoutedEventArgs e) { var n = Tag(s); await AppOp(() => EngineHost.Instance.Engine.NodeSiteRestart(n)); }
+    private async void RestartApp_Click(object s, RoutedEventArgs e) { var n = GetTag(s); await AppOp(() => EngineHost.Instance.Engine.NodeSiteRestart(n)); }
 
     private void FolderApp_Click(object s, RoutedEventArgs e)
     {
-        var dir = EngineHost.Instance.Engine.NodeSiteDir(Tag(s), "frontend");
+        var dir = EngineHost.Instance.Engine.NodeSiteDir(GetTag(s), "frontend");
         if (dir.Length > 0 && System.IO.Directory.Exists(dir))
             try { Process.Start(new ProcessStartInfo { FileName = dir, UseShellExecute = true }); } catch { }
     }
 
     private async void LogsApp_Click(object s, RoutedEventArgs e)
     {
-        var n = Tag(s);
+        var n = GetTag(s);
         var fe = EngineHost.Instance.Engine.NodeSiteLog(n, "frontend");
         var be = EngineHost.Instance.Engine.NodeSiteLog(n, "backend");
         var sb = new StringBuilder();
@@ -212,8 +212,8 @@ public sealed partial class NodePage : Page
         await ShowText($"Logs · {n}", sb.ToString().Trim());
     }
 
-    private async void NpmFe_Click(object s, RoutedEventArgs e) => await NpmOp(Tag(s), "frontend");
-    private async void NpmBe_Click(object s, RoutedEventArgs e) => await NpmOp(Tag(s), "backend");
+    private async void NpmFe_Click(object s, RoutedEventArgs e) => await NpmOp(GetTag(s), "frontend");
+    private async void NpmBe_Click(object s, RoutedEventArgs e) => await NpmOp(GetTag(s), "backend");
 
     private async Task NpmOp(string name, string which)
     {
@@ -224,8 +224,8 @@ public sealed partial class NodePage : Page
         await ShowText($"npm install ({which}) · {name}", output.Length > 0 ? output : (ok ? "done" : "failed"));
     }
 
-    private async void EnvFe_Click(object s, RoutedEventArgs e) => await EnvOp(Tag(s), "frontend");
-    private async void EnvBe_Click(object s, RoutedEventArgs e) => await EnvOp(Tag(s), "backend");
+    private async void EnvFe_Click(object s, RoutedEventArgs e) => await EnvOp(GetTag(s), "frontend");
+    private async void EnvBe_Click(object s, RoutedEventArgs e) => await EnvOp(GetTag(s), "backend");
 
     private async Task EnvOp(string name, string which)
     {
@@ -253,7 +253,7 @@ public sealed partial class NodePage : Page
 
     private async void EditApp_Click(object s, RoutedEventArgs e)
     {
-        var name = Tag(s);
+        var name = GetTag(s);
         var nc = EngineHost.Instance.Engine.NodeSiteConfig(name);
         if (nc is null) return;
         var feCmd  = new TextBox  { Header = "Frontend command", Text = nc.Frontend.Cmd };

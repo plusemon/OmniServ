@@ -1,5 +1,6 @@
 import SwiftUI
 
+@MainActor
 struct ServicesView: View {
     @Environment(AppState.self) private var state
 
@@ -34,6 +35,7 @@ struct ServicesView: View {
     }
 }
 
+@MainActor
 struct ServiceRow: View {
     @Environment(AppState.self) private var state
     let service: Service
@@ -112,6 +114,7 @@ struct ServiceRow: View {
     }
 }
 
+@MainActor
 struct EditPhpIniSheet: View {
     @Environment(AppState.self) private var state
     @Environment(\.dismiss) private var dismiss
@@ -174,6 +177,7 @@ struct EditPhpIniSheet: View {
     }
 }
 
+@MainActor
 struct StatusDot: View {
     let on: Bool
     var body: some View {

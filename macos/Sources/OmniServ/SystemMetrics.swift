@@ -29,7 +29,9 @@ final class Metrics {
         guard timer == nil else { return }
         sample()
         timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.sample() }
+            Task { @MainActor [weak self] in
+                self?.sample()
+            }
         }
     }
 
@@ -61,7 +63,7 @@ final class Metrics {
     }
 
     // ── Darwin sampling ──────────────────────────────────────────────────────
-    static func cpuTicks() -> (Double, Double, Double, Double)? {
+    nonisolated static func cpuTicks() -> (Double, Double, Double, Double)? {
         var info = host_cpu_load_info_data_t()
         var count = mach_msg_type_number_t(MemoryLayout<host_cpu_load_info_data_t>.stride / MemoryLayout<integer_t>.stride)
         let kr = withUnsafeMutablePointer(to: &info) {
@@ -74,7 +76,7 @@ final class Metrics {
         return (Double(info.cpu_ticks.0), Double(info.cpu_ticks.1), Double(info.cpu_ticks.2), Double(info.cpu_ticks.3))
     }
 
-    static func memInfo() -> (used: UInt64, total: UInt64)? {
+    nonisolated static func memInfo() -> (used: UInt64, total: UInt64)? {
         let total = ProcessInfo.processInfo.physicalMemory
         var stats = vm_statistics64()
         var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64>.stride / MemoryLayout<integer_t>.stride)
@@ -91,7 +93,7 @@ final class Metrics {
     }
 
     // Sum rx/tx bytes across non-loopback link-layer interfaces.
-    static func netBytes() -> (inB: UInt64, outB: UInt64)? {
+    nonisolated static func netBytes() -> (inB: UInt64, outB: UInt64)? {
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&ifaddr) == 0 else { return nil }
         defer { freeifaddrs(ifaddr) }
@@ -113,7 +115,7 @@ final class Metrics {
         return (inB, outB)
     }
 
-    static func diskInfo() -> (used: Int64, total: Int64)? {
+    nonisolated static func diskInfo() -> (used: Int64, total: Int64)? {
         let url = URL(fileURLWithPath: "/")
         guard let v = try? url.resourceValues(forKeys: [.volumeTotalCapacityKey, .volumeAvailableCapacityForImportantUsageKey]),
               let total = v.volumeTotalCapacity,
