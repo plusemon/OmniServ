@@ -3,6 +3,7 @@ import AppKit
 
 /// Success/failure notice after a long action (add site, install service) — shows the
 /// engine's steps with green checks, a clickable URL, and Open/Done. (Windows parity.)
+@MainActor
 struct ResultSheet: View {
     @Environment(\.dismiss) private var dismiss
     let result: AppState.ActionResult
@@ -48,6 +49,7 @@ struct ResultSheet: View {
 }
 
 /// Remove-site dialog with the "also delete files + drop database" option. (Windows parity.)
+@MainActor
 struct RemoveSiteSheet: View {
     @Environment(AppState.self) private var state
     @Environment(\.dismiss) private var dismiss

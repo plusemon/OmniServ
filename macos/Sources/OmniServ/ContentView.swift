@@ -30,6 +30,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
     }
 }
 
+@MainActor
 struct ContentView: View {
     @Environment(AppState.self) private var state
     @State private var selection: SidebarItem = .dashboard
@@ -59,22 +60,23 @@ struct ContentView: View {
                 }
                 .tag(item)
             }
-            .navigationSplitViewColumnWidth(min: 170, ideal: 190)
+            .listStyle(.sidebar)
+            .navigationSplitViewColumnWidth(min: 170, ideal: 190, max: 230)
             .safeAreaInset(edge: .bottom) { StatusFooter() }
         } detail: {
             Group {
                 switch selection {
                 case .dashboard: DashboardView()
-                case .services: ServicesView()
-                case .sites: SitesView()
+                case .services:  ServicesView()
+                case .sites:     SitesView()
                 case .databases: DatabasesView()
-                case .node: NodeView()
-                case .python: PythonView()
-                case .logs: LogsView()
-                case .settings: SettingsView()
+                case .node:      NodeView()
+                case .python:    PythonView()
+                case .logs:      LogsView()
+                case .settings:  SettingsView()
                 }
             }
-            .frame(minWidth: 520, minHeight: 420)
+            .frame(minWidth: 520, minHeight: 440)
         }
         .task {
             await state.reload()   // boot auto-start is handled in AppDelegate (window-independent)
@@ -93,10 +95,6 @@ struct ContentView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(state.errorText ?? "")
-        }
-        // Success/failure notice after add-site / install (shown over any tab).
-        .sheet(item: Binding(get: { state.actionResult }, set: { state.actionResult = $0 })) { r in
-            ResultSheet(result: r)
         }
         // Proactive "Update now / Later" prompt when a newer version is found.
         .alert("Update available", isPresented: Binding(
@@ -117,6 +115,7 @@ struct ContentView: View {
 }
 
 /// Bottom-of-sidebar control: overall status + Start/Stop All + refresh.
+@MainActor
 struct StatusFooter: View {
     @Environment(AppState.self) private var state
 

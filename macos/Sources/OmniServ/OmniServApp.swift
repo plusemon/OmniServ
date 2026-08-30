@@ -86,6 +86,7 @@ final class DashboardWindow: NSObject, NSWindowDelegate {
 }
 
 /// Compact menu-bar panel: status, Start/Stop All, quick links, open window.
+@MainActor
 struct MenuBarView: View {
     @Environment(AppState.self) private var state
     @Environment(Metrics.self) private var metrics
@@ -178,6 +179,7 @@ struct MenuBarView: View {
 }
 
 /// A menu-bar list row that highlights on hover (so it reads as clickable).
+@MainActor
 struct MenuLinkRow: View {
     let title: String
     let systemImage: String
@@ -198,6 +200,7 @@ struct MenuLinkRow: View {
     }
 }
 
+@MainActor
 struct MenuMetricRow: View {
     let label: String, percent: Double, detail: String, tint: Color
     var body: some View {

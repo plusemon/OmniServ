@@ -7,6 +7,7 @@ struct EnvTarget: Identifiable { let part: String; var id: String { part } }
 /// Edit a Node app's `.env` (frontend or backend). Saving restarts the site so new
 /// values — including ports — take effect. (Changing the listen PORT also needs the
 /// site's port updated in "Edit config" so nginx proxies to the right place.)
+@MainActor
 struct EnvEditorSheet: View {
     @Environment(AppState.self) private var state
     @Environment(\.dismiss) private var dismiss
@@ -64,6 +65,7 @@ struct EnvEditorSheet: View {
 }
 
 /// Live frontend/backend process logs for a Node site.
+@MainActor
 struct NodeLogsSheet: View {
     @Environment(AppState.self) private var state
     @Environment(\.dismiss) private var dismiss
@@ -100,6 +102,7 @@ struct NodeLogsSheet: View {
 }
 
 /// Process log for a Python app (`py-<name>.log`).
+@MainActor
 struct PyLogsSheet: View {
     @Environment(AppState.self) private var state
     @Environment(\.dismiss) private var dismiss
@@ -131,6 +134,7 @@ struct PyLogsSheet: View {
 
 /// Edit a Node site's config (folders / commands / ports / api paths). Saving
 /// overwrites the definition + re-renders the vhost and restarts the site.
+@MainActor
 struct EditNodeSheet: View {
     @Environment(AppState.self) private var state
     @Environment(\.dismiss) private var dismiss
@@ -176,6 +180,7 @@ struct EditNodeSheet: View {
 
 /// Dedicated "Add Node app" sheet (Node tab). Same fields as the Sites-tab Node
 /// type, without the site-type picker.
+@MainActor
 struct AddNodeAppSheet: View {
     @Environment(AppState.self) private var state
     @Environment(\.dismiss) private var dismiss
@@ -223,6 +228,7 @@ struct AddNodeAppSheet: View {
 }
 
 /// Reusable folder + command + port block (used by Add and Edit).
+@MainActor
 struct NodeAppFields: View {
     let title: String
     @Binding var dir: String

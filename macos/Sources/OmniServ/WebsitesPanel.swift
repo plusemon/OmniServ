@@ -4,6 +4,7 @@ import AppKit
 /// Reusable "managed apps" list section (Node tab, Python tab) — a header with the
 /// title + count + "Show" menu + Search + an Add button, a paginated list of WebsiteRows,
 /// and a prev/next + jump-to-page footer. Mirrors the Sites/Databases list behavior.
+@MainActor
 struct ManagedAppsSection: View {
     @Environment(AppState.self) private var state
     let title: String
@@ -64,6 +65,7 @@ struct ManagedAppsSection: View {
 }
 
 /// Dashboard websites list (ServBay-style) with per-site actions.
+@MainActor
 struct WebsitesPanel: View {
     @Environment(AppState.self) private var state
     @State private var showingAdd = false
@@ -125,6 +127,7 @@ struct WebsitesPanel: View {
     }
 }
 
+@MainActor
 struct ToolsPanel: View {
     @Environment(AppState.self) private var state
     var body: some View {
@@ -141,6 +144,7 @@ struct ToolsPanel: View {
     }
 }
 
+@MainActor
 struct ToolButton: View {
     @Environment(AppState.self) private var state
     let name: String, site: String, icon: String
@@ -175,6 +179,7 @@ struct ToolButton: View {
     }
 }
 
+@MainActor
 struct WebsiteRow: View {
     @Environment(AppState.self) private var state
     let site: Site
@@ -382,6 +387,7 @@ struct WebsiteRow: View {
     }
 }
 
+@MainActor
 struct CircleAction: View {
     let system: String, tint: Color, help: String, action: () -> Void
     init(_ system: String, _ tint: Color, _ help: String, action: @escaping () -> Void) {
@@ -400,6 +406,7 @@ struct CircleAction: View {
     }
 }
 
+@MainActor
 struct SubdomainsSheet: View {
     @Environment(AppState.self) private var state
     @Environment(\.dismiss) private var dismiss
@@ -451,6 +458,7 @@ struct SubdomainsSheet: View {
     }
 }
 
+@MainActor
 struct EditSiteSheet: View {
     @Environment(AppState.self) private var state
     @Environment(\.dismiss) private var dismiss
@@ -515,6 +523,7 @@ struct EditSiteSheet: View {
     }
 }
 
+@MainActor
 struct SiteLogsSheet: View {
     @Environment(AppState.self) private var state
     @Environment(\.dismiss) private var dismiss
@@ -553,6 +562,7 @@ struct SiteLogsSheet: View {
 }
 
 /// Share a site publicly through a Cloudflare quick tunnel (no account needed).
+@MainActor
 struct ShareSheet: View {
     @Environment(AppState.self) private var state
     @Environment(\.dismiss) private var dismiss

@@ -126,7 +126,23 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('windows/**/*.csproj') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Cache Inno Setup
+        id: cache-inno
+        uses: actions/cache@v4
+        with:
+          path: C:\Program Files (x86)\Inno Setup 6
+          key: ${{ runner.os }}-innosetup-6
+
       - name: Install Inno Setup
+        if: steps.cache-inno.outputs.cache-hit != 'true'
         run: choco install innosetup --no-progress
 
       - name: Build OmniServ Windows Installer

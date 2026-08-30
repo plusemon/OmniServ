@@ -30,6 +30,7 @@ enum SitePaging {
 
 /// Top-of-list "Show: 10/15/20/50/100/All" menu. Defaults to the Settings value,
 /// which is always included as an option even if it's a custom number.
+@MainActor
 struct PerPagePicker: View {
     @Binding var size: Int            // 0 = All
     let settingsDefault: Int
@@ -47,6 +48,7 @@ struct PerPagePicker: View {
 }
 
 /// Prev / "Page X of Y" / Next + a jump-to-page box — only renders when paginated.
+@MainActor
 struct PageBar: View {
     @Binding var page: Int
     let pageCount: Int
@@ -81,6 +83,7 @@ struct PageBar: View {
     }
 }
 
+@MainActor
 struct SitesView: View {
     @Environment(AppState.self) private var state
     @State private var showingAdd = false
@@ -157,6 +160,7 @@ struct SitesView: View {
     }
 }
 
+@MainActor
 struct AddSiteSheet: View {
     @Environment(AppState.self) private var state
     @Environment(\.dismiss) private var dismiss

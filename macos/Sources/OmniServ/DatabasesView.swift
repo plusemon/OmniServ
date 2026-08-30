@@ -1,5 +1,6 @@
 import SwiftUI
 
+@MainActor
 struct DatabasesView: View {
     @Environment(AppState.self) private var state
     @State private var newName = ""
@@ -137,6 +138,7 @@ struct DatabasesView: View {
 
 /// A database-server row (MariaDB/MySQL or PostgreSQL): version + state-aware
 /// Start/Stop, Install when absent, Root-password for the MySQL family. Always shown.
+@MainActor
 struct DbServerRow: View {
     @Environment(AppState.self) private var state
     let label: String          // "MariaDB" / "MySQL" / "PostgreSQL"
@@ -187,6 +189,7 @@ struct DbServerRow: View {
     }
 }
 
+@MainActor
 struct DatabaseRow: View {
     @Environment(AppState.self) private var state
     let db: Database
@@ -241,6 +244,7 @@ struct DatabaseRow: View {
     }
 }
 
+@MainActor
 struct RootUserCard: View {
     @Environment(AppState.self) private var state
     @State private var sheet = false
@@ -277,6 +281,7 @@ struct RootUserCard: View {
     }
 }
 
+@MainActor
 struct RootPasswordSheet: View {
     let hasPassword: Bool
     let onSave: (String) -> Void
@@ -308,6 +313,7 @@ struct RootPasswordSheet: View {
     }
 }
 
+@MainActor
 struct PasswordSheet: View {
     let db: Database
     let onSave: (String) -> Void

@@ -2,6 +2,7 @@ import SwiftUI
 
 /// First-run onboarding: ensures Homebrew + the core stack are present before the
 /// main UI is useful.
+@MainActor
 struct SetupView: View {
     @Environment(AppState.self) private var state
 
@@ -71,6 +72,7 @@ struct SetupView: View {
     }
 }
 
+@MainActor
 struct SetupStep<Actions: View>: View {
     let number: Int
     let title: String
