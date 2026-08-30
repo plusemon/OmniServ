@@ -1,0 +1,17 @@
+.DS_Store
+**/.DS_Store
+macos/build/
+macos/.build/
+*.xcuserstate
+macos/dist/
+macos/icon/icon_1024.png
+macos/icon/AppIcon.iconset/
+
+# Claude Code session/local files
+.claude/
+
+# Linux build artifacts
+linux/dist/
+linux/packaging/omniserv.png
+**/__pycache__/
+*.pyc

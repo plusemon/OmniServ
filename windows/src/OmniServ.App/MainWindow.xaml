@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="OmniServ.App.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:muxc="using:Microsoft.UI.Xaml.Controls"
+    Title="OmniServ">
+
+    <Grid>
+        <muxc:NavigationView x:Name="Nav"
+                             PaneDisplayMode="Left"
+                             IsBackButtonVisible="Collapsed"
+                             IsSettingsVisible="True"
+                             SelectionChanged="Nav_SelectionChanged"
+                             Loaded="Nav_Loaded">
+            <muxc:NavigationView.MenuItems>
+                <muxc:NavigationViewItem Content="Dashboard" Tag="dashboard" Icon="Home"/>
+                <muxc:NavigationViewItem Content="Services"  Tag="services"  Icon="AllApps"/>
+                <muxc:NavigationViewItem Content="Sites"     Tag="sites"     Icon="World"/>
+                <muxc:NavigationViewItem Content="Databases" Tag="databases" Icon="Library"/>
+                <muxc:NavigationViewItem Content="Node"      Tag="node"      Icon="Repair"/>
+                <muxc:NavigationViewItem Content="Python"    Tag="python">
+                    <muxc:NavigationViewItem.Icon><FontIcon Glyph="&#xE943;"/></muxc:NavigationViewItem.Icon>
+                </muxc:NavigationViewItem>
+                <muxc:NavigationViewItem Content="Logs"      Tag="logs"      Icon="Document"/>
+            </muxc:NavigationView.MenuItems>
+
+            <Frame x:Name="ContentFrame"/>
+        </muxc:NavigationView>
+    </Grid>
+</Window>

@@ -1,0 +1,252 @@
+using OmniServ.Core;
+
+// Transparent CLI over OmniServ.Core — the Windows analog of `engine/omniserv`.
+// Usage mirrors the mac verbs so muscle memory + docs carry across.
+
+var engine = new Engine();
+var cmd = args.Length > 0 ? args[0] : "status";
+var rest = args.Skip(1).ToArray();
+
+try
+{
+    switch (cmd)
+    {
+        case "init":      engine.Init(); break;
+        case "install":   engine.Install(Arg(rest, 0)); break;
+        case "update":    engine.Update(Arg(rest, 0)); break;
+        case "uninstall": engine.Uninstall(Arg(rest, 0)); break;
+        case "start":     engine.Start(rest.FirstOrDefault() ?? "all"); break;
+        case "stop":      engine.Stop(rest.FirstOrDefault() ?? "all"); break;
+        case "restart":   engine.Restart(rest.FirstOrDefault() ?? "all"); break;
+        case "enable":    engine.Enable(Arg(rest, 0)); break;
+        case "disable":   engine.Disable(Arg(rest, 0)); break;
+        case "secure":    engine.Secure(Arg(rest, 0)); break;
+        case "unsecure":  engine.Unsecure(Arg(rest, 0)); break;
+        case "resecure":  engine.Resecure(Arg(rest, 0)); break;
+        case "status":    engine.Status(); break;
+        case "api":       Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(engine.Api())); break;
+        // Hidden: the GUI delegates php-cgi startup here so the worker is a child of THIS plain
+        // console (where ionCube loads) instead of the WinUI app (where it silently doesn't).
+        case "__spawn-php": PhpCgi.SpawnWorker(Arg(rest, 0)); break;
+        // Hidden: DIAGNOSTIC — dump how THIS process resolves paths + whether it can write the heal log,
+        // to %TEMP%\bhdiag-<pid>.txt. Lets us compare an app-launched context vs a console-launched one.
+        case "__diag":
+        {
+            var lines = new System.Text.StringBuilder();
+            void L(string s) => lines.AppendLine(s);
+            try { L($"pid={Environment.ProcessId}"); } catch (Exception e) { L($"pid ERR {e.Message}"); }
+            try { L($"cwd={Environment.CurrentDirectory}"); } catch (Exception e) { L($"cwd ERR {e.Message}"); }
+            try { L($"LOCALAPPDATA={Environment.GetEnvironmentVariable("LOCALAPPDATA")}"); } catch { }
+            try { L($"OutputRedirected={Console.IsOutputRedirected} ErrorRedirected={Console.IsErrorRedirected}"); } catch (Exception e) { L($"redir ERR {e.Message}"); }
+            try { L($"Paths.Home={OmniServ.Core.Paths.Home}"); } catch (Exception e) { L($"Home ERR {e.GetType().Name} {e.Message}"); }
+            try { L($"Paths.Logs={OmniServ.Core.Paths.Logs}"); } catch (Exception e) { L($"Logs ERR {e.GetType().Name} {e.Message}"); }
+            try { L($"Paths.ConfigJson={OmniServ.Core.Paths.ConfigJson} exists={System.IO.File.Exists(OmniServ.Core.Paths.ConfigJson)}"); } catch (Exception e) { L($"Config ERR {e.GetType().Name} {e.Message}"); }
+            // The exact write the heal log does:
+            try
+            {
+                System.IO.Directory.CreateDirectory(OmniServ.Core.Paths.Logs);
+                var p = System.IO.Path.Combine(OmniServ.Core.Paths.Logs, "php-heal.log");
+                using var fs = new System.IO.FileStream(p, System.IO.FileMode.Append, System.IO.FileAccess.Write, System.IO.FileShare.ReadWrite);
+                var b = System.Text.Encoding.UTF8.GetBytes($"{DateTime.Now:HH:mm:ss} [{Environment.ProcessId}] __diag test-write OK{Environment.NewLine}");
+                fs.Write(b, 0, b.Length);
+                L("heal-log write=OK");
+            }
+            catch (Exception e) { L($"heal-log write=FAIL {e.GetType().Name}: {e.Message}"); }
+            try
+            {
+                var outp = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"bhdiag-{Environment.ProcessId}.txt");
+                System.IO.File.WriteAllText(outp, lines.ToString());
+            }
+            catch { }
+            break;
+        }
+        // Enable/reload the ionCube loader on all active PHP versions (the warm, reliable path — same
+        // as the Dashboard "Enable ionCube" button). Prints a per-version summary.
+        case "ioncube" when Arg(rest, 0) is "enable" or "reload" or "":
+        case "enable-ioncube":
+        { var (_, summary) = engine.EnableIonCube(); Console.WriteLine(summary); break; }
+        // Hidden: single verify-and-heal pass (respawns any php version whose workers lack ionCube).
+        case "__heal-php": engine.PhpHealPass(); break;
+        // Hidden: the reboot heal LOOP — keep respawning until every php version loads ionCube (or the
+        // cap). The App runs this in-process at launch; also runnable manually. Optional arg = cap secs.
+        case "__heal-loop": engine.PhpHealUntilHealthy(int.TryParse(Arg(rest, 0), out var hl) ? hl : 1200); break;
+
+        case "site":
+            switch (Arg(rest, 0))
+            {
+                case "add":
+                {
+                    var name = Arg(rest, 1);
+                    var f = Flags(rest.Skip(2));
+                    engine.SiteAdd(name,
+                        php:    f.GetValueOrDefault("php", ""),
+                        root:   f.GetValueOrDefault("root"),
+                        server: f.GetValueOrDefault("server", ""),
+                        type:   f.GetValueOrDefault("type", "others"));
+                    break;
+                }
+                case "rm" or "remove":
+                {
+                    var purge = rest.Any(a => a is "--purge" or "--delete-files" or "--all");
+                    engine.SiteRemove(Arg(rest, 1), purgeFiles: purge, dropDb: purge);
+                    break;
+                }
+                case "php":                engine.SitePhp(Arg(rest, 1), Arg(rest, 2)); break;
+                case "server":             engine.SiteServer(Arg(rest, 1), Arg(rest, 2)); break;
+                case "subdomain":
+                    switch (Arg(rest, 1))
+                    {
+                        case "list" or "ls" or "":
+                            foreach (var a in engine.SiteSubdomains(Arg(rest, 2))) Console.WriteLine(a);
+                            break;
+                        case "add": engine.SiteSubdomainAdd(Arg(rest, 2), Arg(rest, 3)); break;
+                        case "rm" or "remove": engine.SiteSubdomainRemove(Arg(rest, 2), Arg(rest, 3)); break;
+                        default: Usage(); return 1;
+                    }
+                    break;
+                case "enable":             engine.SiteEnable(Arg(rest, 1), true); break;
+                case "disable":            engine.SiteEnable(Arg(rest, 1), false); break;
+                case "root":               engine.SiteRoot(Arg(rest, 1), Arg(rest, 2)); break;
+                case "list" or "ls" or "": engine.Status(); break;
+                default: Usage(); return 1;
+            }
+            break;
+
+        case "php":
+            switch (Arg(rest, 0))
+            {
+                case "ini" when Arg(rest, 1) == "path":   Console.WriteLine(engine.PhpIniPath(Arg(rest, 2))); break;
+                case "ini" when Arg(rest, 1) == "reload": engine.PhpIniReload(Arg(rest, 2)); break;
+                case "ioncube":                           engine.PhpIoncube(Arg(rest, 1)); break;
+                case "status" or "":                      engine.PhpStatus(); break;
+                default: Usage(); return 1;
+            }
+            break;
+
+        case "db":      engine.Db(Arg(rest, 0), rest.Skip(1).ToArray()); break;
+        case "pg":      engine.Pg(Arg(rest, 0), rest.Skip(1).ToArray()); break;
+        case "node":    engine.Node(Arg(rest, 0), rest.Skip(1).ToArray()); break;
+        case "nodesite":
+            switch (Arg(rest, 0))
+            {
+                case "add":
+                {
+                    var f = Flags(rest.Skip(2));
+                    engine.NodeSiteAdd(Arg(rest, 1),
+                        f.GetValueOrDefault("fe-dir", ""), f.GetValueOrDefault("fe-cmd", ""),
+                        int.TryParse(f.GetValueOrDefault("fe-port"), out var fp) ? fp : 0,
+                        f.GetValueOrDefault("be-dir"), f.GetValueOrDefault("be-cmd"),
+                        int.TryParse(f.GetValueOrDefault("be-port"), out var bp) ? bp : 0,
+                        f.GetValueOrDefault("api", "/api"));
+                    break;
+                }
+                case "start":          engine.NodeSiteStart(Arg(rest, 1)); break;
+                case "stop":           engine.NodeSiteStop(Arg(rest, 1)); break;
+                case "restart":        engine.NodeSiteRestart(Arg(rest, 1)); break;
+                case "rm" or "remove": engine.NodeSiteRemove(Arg(rest, 1)); break;
+                case "npm":
+                {
+                    var which = Arg(rest, 2); if (which.Length == 0) which = "frontend";
+                    var (_, o) = engine.NodeSiteNpm(Arg(rest, 1), which);
+                    if (o.Length > 0) Console.WriteLine(o);
+                    break;
+                }
+                case "list" or "":     engine.NodeSiteList(); break;
+                default: Usage(); return 1;
+            }
+            break;
+        case "pysite":
+            switch (Arg(rest, 0))
+            {
+                case "add":
+                {
+                    var f = Flags(rest.Skip(2));
+                    var venv = f.GetValueOrDefault("venv", "yes");
+                    engine.PySiteAdd(Arg(rest, 1),
+                        f.GetValueOrDefault("dir", ""),
+                        f.GetValueOrDefault("cmd", ""),
+                        int.TryParse(f.GetValueOrDefault("port"), out var pp) ? pp : 0,
+                        venv is not ("no" or "false" or "0"));
+                    break;
+                }
+                case "start":          engine.PySiteStart(Arg(rest, 1)); break;
+                case "stop":           engine.PySiteStop(Arg(rest, 1)); break;
+                case "restart":        engine.PySiteRestart(Arg(rest, 1)); break;
+                case "rm" or "remove": engine.PySiteRemove(Arg(rest, 1)); break;
+                case "pip":
+                {
+                    var (_, o) = engine.PySitePip(Arg(rest, 1));
+                    if (o.Length > 0) Console.WriteLine(o);
+                    break;
+                }
+                case "list" or "":     engine.PySiteList(); break;
+                default: Usage(); return 1;
+            }
+            break;
+        case "doctor":  engine.Doctor(); break;
+        case "logs":    engine.Logs(Arg(rest, 0), int.TryParse(Arg(rest, 1), out var ln) ? ln : 200); break;
+        case "config":
+            switch (Arg(rest, 0))
+            {
+                case "set":               engine.ConfigSet(Arg(rest, 1), Arg(rest, 2)); break;
+                case "show" or "" or null: engine.ConfigShow(); break;
+                default: Usage(); return 1;
+            }
+            break;
+        case "adminer": engine.Adminer(); break;
+        case "pma" or "phpmyadmin": engine.PhpMyAdmin(); break;
+        case "mailpit": engine.Mailpit(); break;
+        case "tunnel":  engine.Tunnel(Arg(rest, 0), rest.Skip(1).ToArray()); break;
+
+        case "help" or "-h" or "--help": Usage(); break;
+        default: Usage(); return 1;
+    }
+    return 0;
+}
+catch (BhException ex)
+{
+    Console.Error.WriteLine($"  ✗ {ex.Message}");
+    return 1;
+}
+catch (NotImplementedException)
+{
+    Console.Error.WriteLine($"[stub] '{cmd}' not implemented yet — see docs/WINDOWS-PORT.md");
+    return 2;
+}
+
+static string Arg(string[] a, int i) => i < a.Length ? a[i] : "";
+
+// Parse "--php 8.4 --root C:\x" → { php:8.4, root:C:\x }
+static Dictionary<string, string> Flags(IEnumerable<string> a)
+{
+    var d = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    var arr = a.ToArray();
+    for (var i = 0; i < arr.Length; i++)
+    {
+        if (!arr[i].StartsWith("--")) continue;
+        var key = arr[i][2..];
+        var val = (i + 1 < arr.Length && !arr[i + 1].StartsWith("--")) ? arr[++i] : "true";
+        d[key] = val;
+    }
+    return d;
+}
+
+static void Usage() => Console.WriteLine("""
+    OmniServ (Windows) — usage:
+      omniserv init | doctor | status | api
+      omniserv install <nginx|php@8.4|mkcert>
+      omniserv start|stop|restart [svc|all]      (svc: nginx|mariadb|mailpit|php@X)
+      omniserv enable|disable <svc>
+      omniserv site add <name> [--php 8.4] [--root path] [--server nginx|apache] [--type wordpress|php|laravel|others]
+      omniserv site rm|list <name>
+      omniserv site php <name> <ver> | site server <name> <nginx|apache>
+      omniserv site subdomain {list|add|rm} <site> [label-or-host]
+      omniserv secure <domain>
+      omniserv db {list|create|drop} [name]
+      omniserv node {list|install|use|uninstall} [version]
+      omniserv php {ioncube <ver>|status|ini path|reload <ver>}
+      omniserv pma | adminer | mailpit            (DB UIs + mail catcher)
+      omniserv tunnel {install|start|stop|url|list} [site]
+      omniserv logs [--list | <file> [lines]]
+      omniserv config {show | set <key> <value>}
+    """);

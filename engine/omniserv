@@ -1,0 +1,2848 @@
+#!/bin/bash
+# OmniServ — a free, self-controlled local dev environment for macOS (Emon Khan)
+# Engine CLI. Manages PHP / Nginx / Apache / DBs / *.test / HTTPS over Homebrew.
+set -euo pipefail
+
+# When launched from a .app bundle (Finder), PATH is minimal and lacks Homebrew.
+# Prepend the usual brew locations so `brew`, clients, etc. resolve either way.
+export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:$PATH"
+
+BH_HOME="${OMNISERV_HOME:-$HOME/.omniserv}"
+BREW="$(command -v brew || true)"
+BREW_PREFIX="$([ -n "$BREW" ] && brew --prefix || echo /opt/homebrew)"
+TLD="test"
+USER_NAME="$(id -un)"
+GROUP_NAME="$(id -gn)"
+
+c_reset=$'\033[0m'; c_g=$'\033[32m'; c_r=$'\033[31m'; c_y=$'\033[33m'; c_dim=$'\033[2m'; c_b=$'\033[1m'
+ok(){ printf "  ${c_g}✓${c_reset} %s\n" "$*"; }
+no(){ printf "  ${c_r}✗${c_reset} %s\n" "$*"; }
+warn(){ printf "  ${c_y}!${c_reset} %s\n" "$*"; }
+hdr(){ printf "\n${c_b}%s${c_reset}\n" "$*"; }
+die(){ no "$*"; exit 1; }
+info(){ printf "  ${c_dim}%s${c_reset}\n" "$*"; }
+# Portable in-place sed — GNU (Linux) is `sed -i`; BSD (macOS) needs `sed -i ''`.
+sedi(){ if sed --version >/dev/null 2>&1; then sed -i "$@"; else sed -i '' "$@"; fi; }
+
+# Service registry:  key | brew formula | version-probe binary (relative to brew prefix) | role
+services() {
+  cat <<EOF
+php|php|bin/php|php
+php@8.6|shivammathur/php/php@8.6|opt/php@8.6/bin/php|php
+php@8.5|php@8.5|opt/php@8.5/bin/php|php
+php@8.4|php@8.4|opt/php@8.4/bin/php|php
+php@8.3|php@8.3|opt/php@8.3/bin/php|php
+php@8.2|php@8.2|opt/php@8.2/bin/php|php
+php@8.1|php@8.1|opt/php@8.1/bin/php|php
+nginx|nginx|bin/nginx|web
+httpd|httpd|bin/httpd|web
+mariadb|mariadb|opt/mariadb/bin/mariadb|db
+mysql|mysql|opt/mysql/bin/mysql|db
+postgresql@17|postgresql@17|opt/postgresql@17/bin/postgres|db
+redis|redis|bin/redis-server|cache
+memcached|memcached|bin/memcached|cache
+dnsmasq|dnsmasq|sbin/dnsmasq|dns
+mkcert|mkcert|bin/mkcert|tls
+mailpit|mailpit|bin/mailpit|mail
+fnm|fnm|bin/fnm|node
+python|python@3.13|opt/python@3.13/bin/python3.13|python
+EOF
+}
+
+# ── helpers ───────────────────────────────────────────────────────────────
+svc_formula(){ services | awk -F'|' -v k="$1" '$1==k{print $2}'; }
+svc_probe(){   services | awk -F'|' -v k="$1" '$1==k{print $3}'; }
+svc_role(){    services | awk -F'|' -v k="$1" '$1==k{print $4}'; }
+svc_exists(){  services | awk -F'|' -v k="$1" '$1==k{f=1} END{exit !f}'; }
+svc_installed(){ local p; p="$(svc_probe "$1")"; [ -n "$p" ] && [ -x "$BREW_PREFIX/$p" ]; }
+
+# ── auto-start set ("default" services) ──────────────────────────────────────
+# Which services 'start all' brings up. Stored one key per line; when the file is
+# absent, a sensible default set applies (nginx + default PHP + MariaDB).
+ENABLED_FILE(){ echo "$BH_HOME/config/enabled"; }
+svc_default_enabled(){
+  case "$1" in
+    nginx|mariadb) return 0 ;;
+    php@*|php) [ "$1" = "$(php_key default)" ] && return 0 || return 1 ;;
+    *) return 1 ;;
+  esac
+}
+svc_enabled(){
+  local f; f="$(ENABLED_FILE)"
+  if [ -f "$f" ]; then grep -qxF "$1" "$f"; else svc_default_enabled "$1"; fi
+}
+materialize_enabled(){
+  local f; f="$(ENABLED_FILE)"; [ -f "$f" ] && return 0
+  local IFS='|' key _a _b _c; : > "$f"
+  while read -r key _a _b _c; do [ -n "$key" ] && svc_default_enabled "$key" && echo "$key" >> "$f"; done < <(services)
+  return 0
+}
+enable_svc(){ materialize_enabled; local f; f="$(ENABLED_FILE)"; grep -qxF "$1" "$f" || echo "$1" >> "$f"; }
+disable_svc(){ materialize_enabled; local f; f="$(ENABLED_FILE)"; grep -vxF "$1" "$f" > "$f.tmp" 2>/dev/null && mv "$f.tmp" "$f" || true; }
+
+cmd_enable(){ need_init; [ $# -ge 1 ] || die "usage: omniserv enable <svc>"; svc_exists "$1" || die "unknown service: $1"; enable_svc "$1"; ok "$1 will auto-start"; }
+cmd_disable(){ need_init; [ $# -ge 1 ] || die "usage: omniserv disable <svc>"; disable_svc "$1"; ok "$1 won't auto-start"; }
+
+# Version probe — robust under `set -e`/pipefail. nginx/httpd reject --version
+# and print to stderr, so fall back to -v; never propagate a non-zero exit.
+# A version line is "bad" if it's empty, an error, or a daemon log line (mailpit's `-v`
+# means *verbose* and prints `time=… level=…` — not a version).
+_ver_bad(){ case "$1" in ""|*invalid*|*unknown*|*"Error:"*|*"level="*|time=*|*AH00558*|*AH00111*|*"[core:warn]"*|"["*|*"already running"*|*"cannot cre"*|Usage:*) return 0;; *) return 1;; esac; }
+probe_version(){
+  local bin="$1" out=""
+  # ⚠️ httpd: `--version` is NOT a flag Apache knows — it responds by LAUNCHING the server with
+  # the brew default config (daemonizes, binds *:8080, prints AH00558). Every api refresh was
+  # spawning rogue instances that then blocked OmniServ's own Apache. `-v` is the safe flag
+  # (prints the version, never parses config) — use it exclusively for httpd.
+  case "$bin" in *httpd*) printf '%s' "$("$bin" -v 2>&1 | head -1)" | tr -d '\n' | cut -c1-46; return;; esac
+  out="$("$bin" --version 2>&1 | head -1)" || true
+  # try, in order: -v, a `version` subcommand (mailpit/fnm/cloudflared), then -version
+  _ver_bad "$out" && { out="$("$bin" -v 2>&1 | head -1)" || true; }
+  _ver_bad "$out" && { out="$("$bin" version 2>&1 | head -1)" || true; }
+  _ver_bad "$out" && { out="$("$bin" -version 2>&1 | head -1)" || true; }
+  printf '%s' "$out" | tr -d '\n' | cut -c1-46
+}
+
+# Normalize a --php value ("8.4", "php@8.4", "default", "") to a registry key.
+php_key(){
+  local v="${1:-}"
+  case "$v" in
+    ""|default) v="$(jget default_php 8.4)" ;;
+  esac
+  case "$v" in
+    php) echo php ;;
+    php@*) echo "$v" ;;
+    *) echo "php@$v" ;;
+  esac
+}
+
+# php-fpm binary for a php registry key.
+php_fpm_bin(){
+  local key="$1"
+  if [ "$key" = "php" ]; then echo "$BREW_PREFIX/sbin/php-fpm"
+  else echo "$BREW_PREFIX/opt/$key/sbin/php-fpm"; fi
+}
+
+# Sanitized socket label for a php key:  php@8.4 -> 8.4 ; php -> default
+php_label(){ local k="$1"; [ "$k" = "php" ] && echo default || echo "${k#php@}"; }
+php_sock(){ echo "$BH_HOME/run/php-$(php_label "$1").sock"; }
+
+# Tiny JSON getter (string/number values) from omniserv.json, with fallback.
+jget(){
+  local key="$1" fb="${2:-}" cfg="$BH_HOME/config/omniserv.json" v
+  [ -f "$cfg" ] || { echo "$fb"; return; }
+  v="$(sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\{0,1\}\([^\",}]*\)\"\{0,1\}.*/\1/p" "$cfg" | head -1)"
+  [ -n "$v" ] && echo "$v" || echo "$fb"
+}
+
+need_init(){ [ -d "$BH_HOME/config" ] || die "not initialized — run: omniserv init"; }
+
+# Does a pid exist? Uses ps (ownership-independent) so a non-root caller can
+# still see the root-owned nginx master (kill -0 would EPERM-fail there).
+pid_alive(){ local p="${1:-}"; [ -n "$p" ] && ps -p "$p" >/dev/null 2>&1; }
+
+# ── init ────────────────────────────────────────────────────────────────────
+cmd_init() {
+  hdr "Initializing OmniServ at $BH_HOME"
+  for d in config nginx/sites apache/sites php logs run sites certs tmp; do mkdir -p "$BH_HOME/$d"; done
+  for d in client_body proxy fastcgi uwsgi scgi; do mkdir -p "$BH_HOME/tmp/$d"; done
+  local cfg="$BH_HOME/config/omniserv.json"
+  if [ ! -f "$cfg" ]; then
+    cat > "$cfg" <<JSON
+{
+  "tld": "test",
+  "http_port": 80,
+  "https_port": 443,
+  "default_php": "8.4",
+  "default_web": "nginx",
+  "brew_prefix": "$BREW_PREFIX",
+  "sites_root": "$HOME/OmniServ/www",
+  "autostart": false
+}
+JSON
+    ok "wrote default config: $cfg"
+  else
+    ok "config already exists: $cfg"
+  fi
+  render_nginx_main
+  ok "directories ready under $BH_HOME"
+}
+
+# ── install (brew wrapper) ───────────────────────────────────────────────────
+cmd_install() {
+  need_init
+  [ $# -ge 1 ] || die "usage: omniserv install <svc|all>  (e.g. nginx, httpd, dnsmasq, mkcert, redis, postgresql@17, mailpit, node)"
+  [ -n "$BREW" ] || die "Homebrew not found — install from https://brew.sh"
+  local targets=()
+  if [ "$1" = "all" ]; then
+    while IFS='|' read -r key _ _ _; do [ -n "$key" ] && targets+=("$key"); done < <(services)
+  else
+    targets=("$@")
+  fi
+  for key in "${targets[@]}"; do
+    svc_exists "$key" || { warn "unknown service: $key (skipped)"; continue; }
+    if svc_installed "$key"; then ok "$key already installed"; continue; fi
+    local formula; formula="$(svc_formula "$key")"
+    hdr "Installing $key  (brew install $formula)"
+    brew install "$formula" && ok "$key installed" || no "brew install $formula failed"
+  done
+}
+
+# Stop a service (any role) before uninstall/reconfig.
+svc_stop_any(){
+  case "$(svc_role "$1")" in
+    php) fpm_stop "$1" >/dev/null 2>&1 || true ;;
+    web) [ "$1" = nginx ] && nginx_stop >/dev/null 2>&1; [ "$1" = httpd ] && apache_stop >/dev/null 2>&1 || true ;;
+    db|cache|mail) brew_svc stop "$1" >/dev/null 2>&1 || true ;;
+  esac
+}
+
+# Is a brew-services formula currently started?
+brew_svc_running(){ brew services list 2>/dev/null | awk -v f="$1" '$1==f && $2=="started"{e=1} END{exit !e}'; }
+
+# Standard post-upgrade step for MariaDB/MySQL — the same `mariadb-upgrade` you'd run on a
+# live box: migrates the system / privilege tables to the new server version. No dump — the
+# data directory stays compatible across the upgrade; this just refreshes the metadata.
+db_post_upgrade(){
+  local up=""
+  for c in mariadb-upgrade mysql_upgrade; do [ -x "$BREW_PREFIX/bin/$c" ] && { up="$BREW_PREFIX/bin/$c"; break; }; done
+  [ -n "$up" ] || return 0
+  brew_svc_running "$(svc_formula mariadb)" || brew_svc_running "$(svc_formula mysql)" || {
+    warn "database not running — once it's up, run: $up"; return 0; }
+  sleep 1
+  info "running $(basename "$up") (migrate system tables to the new version)…"
+  if "$up" >/dev/null 2>&1 || "$up" -u root >/dev/null 2>&1; then ok "$(basename "$up") complete — databases ready"
+  else warn "$(basename "$up") reported issues — run it manually: $up"; fi
+}
+
+# Upgrade ONE service to the latest stable: brew upgrade, restart onto the new binary so
+# sites keep working, then (DB) run mariadb-upgrade. Data + config are never touched.
+update_one(){
+  local key="$1" f role; f="$(svc_formula "$key")"; role="$(svc_role "$key")"
+  hdr "Updating $key → latest stable  (brew upgrade $f)"
+  brew upgrade "$f" 2>&1 | tail -3 || true
+  case "$role" in
+    php) if fpm_running "$key"; then fpm_stop "$key" >/dev/null 2>&1 || true; fpm_start "$key" >/dev/null 2>&1 || true; fi ;;
+    web) if [ "$key" = nginx ] && nginx_running; then nginx_stop >/dev/null 2>&1 || true; nginx_start >/dev/null 2>&1 || warn "nginx didn't restart — it keeps serving on the old binary; restart it to apply the update"; fi
+         if [ "$key" = httpd ] && apache_running; then apache_stop >/dev/null 2>&1 || true; apache_start >/dev/null 2>&1 || true; fi ;;
+    db|cache|mail) if brew_svc_running "$f"; then brew_svc stop "$key" >/dev/null 2>&1 || true; sleep 1; brew_svc start "$key" >/dev/null 2>&1 || warn "$key didn't restart after upgrade"; fi ;;
+  esac
+  ok "$key now $(probe_version "$BREW_PREFIX/$(svc_probe "$key")")"
+  case "$key" in mariadb|mysql) db_post_upgrade ;; esac
+}
+
+cmd_update() {
+  need_init; [ $# -ge 1 ] || die "usage: omniserv update <svc|all>"
+  [ -n "$BREW" ] || die "Homebrew not found"
+  brew update >/dev/null 2>&1 || true
+  if [ "$1" = all ]; then
+    hdr "Updating all installed services → latest stable"
+    local IFS='|' key _f _p _r
+    while read -r key _f _p _r; do
+      [ -n "$key" ] || continue; svc_installed "$key" || continue
+      update_one "$key"
+    done < <(services)
+    ok "all services updated to latest stable"
+    return
+  fi
+  for key in "$@"; do
+    svc_exists "$key" || { warn "unknown service: $key"; continue; }
+    svc_installed "$key" || { warn "$key not installed"; continue; }
+    update_one "$key"
+  done
+}
+
+cmd_uninstall() {
+  need_init; [ $# -ge 1 ] || die "usage: omniserv uninstall <svc>"
+  [ -n "$BREW" ] || die "Homebrew not found"
+  for key in "$@"; do
+    svc_exists "$key" || { warn "unknown service: $key"; continue; }
+    svc_installed "$key" || { warn "$key not installed"; continue; }
+    local f; f="$(svc_formula "$key")"
+    hdr "Uninstalling $key  (brew uninstall $f)"
+    svc_stop_any "$key"
+    brew uninstall "$f" && ok "$key uninstalled" || no "uninstall failed (a dependency may need it)"
+  done
+}
+
+# ── nginx config generation ──────────────────────────────────────────────────
+render_nginx_main() {
+  local conf="$BH_HOME/nginx/nginx.conf"
+  cat > "$conf" <<NGINX
+# Generated by OmniServ — do not edit by hand (regenerated on init / site changes).
+# Master runs as root (to bind :80/:443); workers drop to the invoking user so
+# they can read the user-owned PHP-FPM sockets and mkcert keys (else 502 / TLS fail).
+user $USER_NAME $GROUP_NAME;
+worker_processes auto;
+worker_rlimit_nofile 65535;
+error_log $BH_HOME/logs/nginx-error.log;
+pid $BH_HOME/run/nginx.pid;
+events {
+    worker_connections 4096;
+    multi_accept on;
+}
+http {
+    include $BREW_PREFIX/etc/nginx/mime.types;
+    default_type application/octet-stream;
+    access_log $BH_HOME/logs/nginx-access.log;
+    client_body_temp_path $BH_HOME/tmp/client_body;
+    proxy_temp_path       $BH_HOME/tmp/proxy;
+    fastcgi_temp_path     $BH_HOME/tmp/fastcgi;
+    uwsgi_temp_path       $BH_HOME/tmp/uwsgi;
+    scgi_temp_path        $BH_HOME/tmp/scgi;
+
+    # performance
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    keepalive_timeout 65;
+    reset_timedout_connection on;
+    types_hash_max_size 4096;
+    server_names_hash_bucket_size 128;
+    server_tokens off;
+    client_max_body_size 2048m;
+    client_body_buffer_size 256k;
+    client_header_buffer_size 4k;
+    large_client_header_buffers 4 16k;
+
+    # fastcgi tuning (big apps + slow imports)
+    fastcgi_buffers 16 16k;
+    fastcgi_buffer_size 32k;
+    fastcgi_busy_buffers_size 64k;
+    fastcgi_read_timeout 600;
+    fastcgi_connect_timeout 60;
+
+    # static-file fd cache
+    open_file_cache max=10000 inactive=30s;
+    open_file_cache_valid 60s;
+    open_file_cache_min_uses 2;
+    open_file_cache_errors on;
+
+    # gzip
+    gzip on;
+    gzip_comp_level 5;
+    gzip_min_length 256;
+    gzip_proxied any;
+    gzip_vary on;
+    gzip_types text/plain text/css text/xml text/javascript application/json
+               application/javascript application/xml application/xml+rss
+               application/rss+xml image/svg+xml application/wasm font/ttf font/otf;
+
+    # Catch-all default so an unknown host doesn't leak the first site.
+    server {
+        listen 127.0.0.1:${1:-80} default_server;
+        server_name _;
+        return 444;
+    }
+
+    include $BH_HOME/nginx/sites/*.conf;
+}
+NGINX
+  ok "nginx main config: $conf"
+}
+
+APACHE_PORT=8080
+
+# Render a site. server=nginx → nginx serves PHP directly (fast, no .htaccess).
+# server=apache → nginx fronts (TLS/80/443) and proxies the host to Apache on
+# :8080, which serves with AllowOverride All so .htaccess works natively.
+# NEVER render an empty root: `root ;` is a fatal nginx config error that takes down EVERY
+# site, and once written, later switches re-parse it as empty forever (this exact corruption
+# broke a Windows install). Self-heal to the conventional <sites_root>/<name> when that folder
+# exists; otherwise refuse with rc=1. Prints the resolved root on stdout (messages → stderr) so
+# callers can `root="$(vhost_root_check "$name" "$root")" || return 1`. Used by the shared
+# render_site_vhost AND platform overrides of it (Linux redefines it for the OLS backend).
+vhost_root_check(){
+  local name="$1" root="$2"
+  if [ -z "${root// /}" ]; then
+    local g; g="$(jget sites_root "$HOME/OmniServ/www")/$name"
+    if [ -d "$g" ]; then warn "$name: document root was missing — restored to $g" >&2; printf '%s' "$g"; return 0
+    else no "site '$name' has no document root — fix it with: omniserv site root $name <folder>" >&2; return 1; fi
+  fi
+  printf '%s' "$root"
+}
+
+# Reject a document root that would corrupt the vhost or a later re-parse. A folder PICKER can
+# hand us almost anything, and an unvalidated value reaches an nginx directive (`;`/newline =
+# config injection / fatal error) and, via the readers below, `rm -rf` under `site rm --purge`.
+# Spaces ARE allowed — the renderers quote the value (that's the point of this pass).
+valid_site_root(){
+  local r="$1"
+  case "$r" in
+    "") return 0 ;;                                     # empty is handled by vhost_root_check
+    */*) ;; *) die "document root must be a path: '$r'" ;;
+  esac
+  case "$r" in
+    *';'*|*'"'*|*'{'*|*'}'*|*'$'*|*'\'*) die "invalid document root '$r' (must not contain ; \" { } \$ or \\)" ;;
+  esac
+  [ "$r" = "${r%%$'\n'*}" ] || die "invalid document root (contains a newline)"
+}
+
+# Read the document root back out of a vhost. Handles BOTH the quoted form we render now
+# (root "/srv/My Site";) and the LEGACY unquoted form (root /srv/site;) still on disk in every
+# pre-existing install, plus an optional trailing comment. Replaces a scattered
+# `awk '{print $2}' | tr -d ';'` that silently truncated any path containing a space.
+vhost_root_read(){
+  sed -n 's/^[[:space:]]*root[[:space:]]\{1,\}\([^;]*\);.*$/\1/p' "$1" 2>/dev/null \
+    | head -1 | sed 's/^"\(.*\)"$/\1/'
+}
+
+render_site_vhost() {
+  local name="$1" domain="$2" root="$3" phpkey="$4" server="${5:-nginx}"
+  root="$(vhost_root_check "$name" "$root")" || return 1
+  if [ "$server" = apache ]; then
+    render_apache_vhost "$name" "$domain" "$root" "$phpkey"
+    render_nginx_proxy_vhost "$name" "$domain" "$root" "$phpkey"
+  else
+    render_nginx_php_vhost "$name" "$domain" "$root" "$phpkey"
+  fi
+}
+
+vhost_domains(){ awk '/server_name/{for(i=2;i<=NF;i++){gsub(/;/,"",$i); if($i!="_") print $i} exit}' "$1"; }
+vhost_aliases(){ local conf="$1" domain="$2"; vhost_domains "$conf" | awk -v d="$domain" '$0!=d'; }
+vhost_server_names(){
+  local name="$1" domain="$2" conf="$BH_HOME/nginx/sites/$1.conf" off="$BH_HOME/nginx/sites/$1.conf.disabled" aliases=""
+  [ -f "$conf" ] || conf="$off"
+  [ -f "$conf" ] && aliases="$(vhost_aliases "$conf" "$domain" | tr '\n' ' ')"
+  printf '%s%s%s' "$domain" "${aliases:+ }" "$aliases"
+}
+
+# common: emit the nginx listen/ssl lines for a domain
+nginx_listen_block() {
+  local domain="$1" http https cert key
+  http="$(jget http_port 80)"; https="$(jget https_port 443)"
+  cert="$BH_HOME/certs/$domain.pem"; key="$BH_HOME/certs/$domain-key.pem"
+  printf '    listen 127.0.0.1:%s;\n' "$http"
+  if [ -f "$cert" ] && [ -f "$key" ]; then
+    printf '    listen 127.0.0.1:%s ssl;\n    ssl_certificate %s;\n    ssl_certificate_key %s;\n' "$https" "$cert" "$key"
+  else
+    printf '    # HTTPS not provisioned — run: omniserv secure %s\n' "$domain"
+  fi
+}
+
+render_nginx_php_vhost() {
+  local name="$1" domain="$2" root="$3" phpkey="$4" sock conf names
+  sock="$(php_sock "$phpkey")"; conf="$BH_HOME/nginx/sites/$name.conf"
+  names="$(vhost_server_names "$name" "$domain")"
+  cat > "$conf" <<NGINX
+# OmniServ site: $name  ($domain)  php=$phpkey server=nginx
+server {
+$(nginx_listen_block "$domain")
+    server_name $names;
+    root "$root";
+    index index.php index.html index.htm;
+
+    access_log $BH_HOME/logs/$name-access.log;
+    error_log  $BH_HOME/logs/$name-error.log;
+
+    location / { try_files \$uri \$uri/ /index.php?\$query_string; }
+
+    location ~ \.php\$ {
+        try_files \$uri =404;
+        include $BREW_PREFIX/etc/nginx/fastcgi_params;
+        fastcgi_pass unix:$sock;
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+        fastcgi_param PATH_INFO \$fastcgi_path_info;
+    }
+
+    location ~ /\.(?!well-known).* { deny all; }
+}
+NGINX
+  ok "site vhost (nginx): $conf"
+}
+
+# nginx front that proxies the whole host to Apache (which serves + .htaccess)
+render_nginx_proxy_vhost() {
+  local name="$1" domain="$2" root="$3" phpkey="$4" conf="$BH_HOME/nginx/sites/$1.conf" names
+  names="$(vhost_server_names "$name" "$domain")"
+  cat > "$conf" <<NGINX
+# OmniServ site: $name  ($domain)  php=$phpkey server=apache
+server {
+$(nginx_listen_block "$domain")
+    server_name $names;
+    root "$root";   # served by Apache (:$APACHE_PORT); kept for tooling/metadata
+
+    access_log $BH_HOME/logs/$name-access.log;
+    error_log  $BH_HOME/logs/$name-error.log;
+
+    location / {
+        proxy_pass http://127.0.0.1:$APACHE_PORT;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_read_timeout 600;
+    }
+}
+NGINX
+  ok "site vhost (nginx→apache): $conf"
+}
+
+# Generic nginx vhost proxying a host to a local HTTP port (e.g. Mailpit :8025).
+render_nginx_proxy_site() {
+  local name="$1" domain="$2" port="$3" conf="$BH_HOME/nginx/sites/$1.conf" names
+  names="$(vhost_server_names "$name" "$domain")"
+  cat > "$conf" <<NGINX
+# OmniServ site: $name  ($domain)  php=- server=proxy
+server {
+$(nginx_listen_block "$domain")
+    server_name $names;
+    location / {
+        proxy_pass http://127.0.0.1:$port;
+        proxy_set_header Host \$host;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 600;
+    }
+}
+NGINX
+  ok "site vhost (proxy → :$port): $conf"
+}
+
+# ── Node sites (managed frontend + optional backend, reverse-proxied) ─────────
+# Config stored as JSON at $BH_HOME/node-sites/<name>.json (one field per line).
+# Processes are supervised via pid files in run/, logs in logs/node-<name>-<part>.log.
+
+# Read a flat-JSON string field (our writer keeps one "key": "value" per line).
+njson(){ sed -n "s/^\"$2\": \"\(.*\)\".*/\1/p" "$1" | head -1; }
+
+# Kill a process and all its descendants (next dev / npm spawn child workers).
+kill_tree(){ local p="$1" c; for c in $(pgrep -P "$p" 2>/dev/null); do kill_tree "$c"; done; kill "$p" 2>/dev/null || true; }
+
+node_proc_running(){ local pidf="$BH_HOME/run/node-$1-$2.pid"; [ -f "$pidf" ] && pid_alive "$(cat "$pidf")"; }
+
+# PATH used to launch node-site processes: OmniServ node (fnm) + the default PHP + brew.
+# default_php may be stored as "php@8.4" or "8.4" — normalize to the version label so
+# the php@<ver> keg path resolves (else php falls through to brew's 7.4 and Laravel dies).
+node_runpath(){ local d; d="$(jget default_php 8.4)"; d="${d#php@}"; echo "$BH_HOME/bin:$BREW_PREFIX/opt/php@$d/bin:$BREW_PREFIX/bin:/usr/bin:/bin:/usr/sbin:/sbin"; }
+
+node_start_proc(){ # name part dir cmd port
+  local name="$1" part="$2" dir="$3" cmd="$4" port="$5"
+  [ -n "$cmd" ] && [ -n "$dir" ] || return 0          # backend optional
+  [ -d "$dir" ] || { warn "$name $part: dir not found ($dir)"; return 1; }
+  node_proc_running "$name" "$part" && { ok "$name $part already running"; return 0; }
+  local pidf="$BH_HOME/run/node-$name-$part.pid" logf="$BH_HOME/logs/node-$name-$part.log"
+  local caroot; caroot="$("$BREW_PREFIX/bin/mkcert" -CAROOT 2>/dev/null)"
+  ( cd "$dir" && exec env PATH="$(node_runpath)" PORT="$port" \
+       NODE_EXTRA_CA_CERTS="${caroot:+$caroot/rootCA.pem}" \
+       bash -c "$cmd" ) >>"$logf" 2>&1 &
+  echo $! > "$pidf"
+  ok "$name $part started (pid $(cat "$pidf"), port $port)  → logs/node-$name-$part.log"
+}
+
+node_stop_proc(){ # name part
+  local pidf="$BH_HOME/run/node-$1-$2.pid"
+  [ -f "$pidf" ] || return 0
+  kill_tree "$(cat "$pidf")"; rm -f "$pidf"
+}
+
+render_nginx_node_vhost(){ # name domain feport beport apipaths [serverlabel=node]
+  local name="$1" domain="$2" feport="$3" beport="$4" apipaths="$5" srvlabel="${6:-node}" conf="$BH_HOME/nginx/sites/$name.conf" names
+  local apiblock=""
+  names="$(vhost_server_names "$name" "$domain")"
+  if [ -n "$beport" ]; then
+    apiblock="$(cat <<NG
+
+    location ~ ^/($apipaths)(/|\$) {
+        proxy_pass http://127.0.0.1:$beport;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_read_timeout 600;
+    }
+NG
+)"
+  fi
+  cat > "$conf" <<NGINX
+# OmniServ site: $name  ($domain)  php=- server=$srvlabel
+server {
+$(nginx_listen_block "$domain")
+    server_name $names;
+    access_log $BH_HOME/logs/$name-access.log;
+    error_log  $BH_HOME/logs/$name-error.log;
+    client_max_body_size 2048m;
+$apiblock
+    location / {
+        proxy_pass http://127.0.0.1:$feport;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 600;
+    }
+}
+NGINX
+  ok "node vhost: $conf"
+}
+
+# mkcert a trusted cert for a node-site domain (best-effort; vhost picks it up).
+node_secure(){
+  local domain="$1" mkc="$BREW_PREFIX/bin/mkcert"
+  [ -x "$mkc" ] || return 0
+  mkdir -p "$BH_HOME/certs"
+  ( cd "$BH_HOME/certs" && "$mkc" -cert-file "$domain.pem" -key-file "$domain-key.pem" "$domain" ) >/dev/null 2>&1 || true
+}
+
+# JSON fragment appended to a node site's api row (running state + ports/dirs/cmds).
+node_api_fields(){
+  local name="$1"
+  local j="$BH_HOME/node-sites/$name.json"
+  [ -f "$j" ] || { printf ',"node":false'; return; }
+  local fr=false br=false bed; bed="$(njson "$j" be_dir)"
+  node_proc_running "$name" fe && fr=true
+  [ -n "$bed" ] && { node_proc_running "$name" be && br=true; }
+  printf ',"node":true,"feRunning":%s,"beRunning":%s,"fePort":"%s","bePort":"%s","feDir":"%s","beDir":"%s","feCmd":"%s","beCmd":"%s","apiPaths":"%s"' \
+    "$fr" "$br" "$(njson "$j" fe_port)" "$(njson "$j" be_port)" \
+    "$(json_esc "$(njson "$j" fe_dir)")" "$(json_esc "$bed")" \
+    "$(json_esc "$(njson "$j" fe_cmd)")" "$(json_esc "$(njson "$j" be_cmd)")" \
+    "$(json_esc "$(njson "$j" api_paths)")"
+}
+
+nodesite_add(){
+  local name="$1" fedir="" fecmd="npm run dev" feport="" bedir="" becmd="" beport="" node=""
+  local apipaths="api|storage|sanctum|admin|livewire|vendor|build|up"
+  shift || true
+  while [ $# -gt 0 ]; do case "$1" in
+    --fe-dir) fedir="$2"; shift 2;;  --fe-cmd) fecmd="$2"; shift 2;;  --fe-port) feport="$2"; shift 2;;
+    --be-dir) bedir="$2"; shift 2;;  --be-cmd) becmd="$2"; shift 2;;  --be-port) beport="$2"; shift 2;;
+    --node) node="$2"; shift 2;;     --api-paths) apipaths="$2"; shift 2;;
+    *) die "unknown flag: $1";;
+  esac; done
+  [ -n "$name" ] || die "usage: omniserv nodesite add <name> --fe-dir <path> --fe-port <n> [--fe-cmd <cmd>] [--be-dir <path> --be-port <n> --be-cmd <cmd>] [--api-paths <re>]"
+  printf '%s' "$name" | grep -qE '^[a-z0-9][a-z0-9-]*$' || die "invalid name (lowercase letters, digits, hyphens)"
+  [ -n "$fedir" ] && [ -n "$feport" ] || die "frontend needs --fe-dir and --fe-port"
+  [ -n "$bedir" ] && [ -z "$beport" ] && die "backend dir given but no --be-port"
+  local tld; tld="$(jget tld test)"; local domain="$name.$tld"
+  mkdir -p "$BH_HOME/node-sites"
+  cat > "$BH_HOME/node-sites/$name.json" <<JSON
+{
+"name": "$name",
+"domain": "$domain",
+"fe_dir": "$(json_esc "$fedir")",
+"fe_cmd": "$(json_esc "$fecmd")",
+"fe_port": "$feport",
+"be_dir": "$(json_esc "$bedir")",
+"be_cmd": "$(json_esc "$becmd")",
+"be_port": "$beport",
+"node": "$node",
+"api_paths": "$(json_esc "$apipaths")"
+}
+JSON
+  node_secure "$domain"
+  render_nginx_node_vhost "$name" "$domain" "$feport" "$beport" "$apipaths"
+  nginx_running && nginx_reload >/dev/null 2>&1 || true
+  hdr "Node site '$name' added"
+  info "url    : https://$domain"
+  info "fe     : :$feport  ($fedir)"
+  [ -n "$bedir" ] && info "be     : :$beport  ($bedir)"
+  info "start  : omniserv nodesite start $name"
+}
+
+nodesite_start(){
+  local name="$1" j="$BH_HOME/node-sites/$1.json"
+  [ -f "$j" ] || die "no node site: ${1:-<name>}"
+  hdr "Starting node site $name"
+  node_start_proc "$name" be "$(njson "$j" be_dir)" "$(njson "$j" be_cmd)" "$(njson "$j" be_port)"
+  node_start_proc "$name" fe "$(njson "$j" fe_dir)" "$(njson "$j" fe_cmd)" "$(njson "$j" fe_port)"
+  nginx_running && nginx_reload >/dev/null 2>&1 || nginx_start >/dev/null 2>&1 || true
+  ok "node site $name → https://$(njson "$j" domain)  (first request compiles; give it a few seconds)"
+}
+
+nodesite_stop(){
+  local name="$1"; [ -n "$name" ] || die "usage: omniserv nodesite stop <name>"
+  node_stop_proc "$name" fe; node_stop_proc "$name" be
+  ok "node site $name stopped"
+}
+
+nodesite_status(){
+  local name="$1" j="$BH_HOME/node-sites/$1.json"
+  [ -f "$j" ] || die "no node site: ${1:-<name>}"
+  local fr=stopped br=""
+  node_proc_running "$name" fe && fr=running
+  [ -n "$(njson "$j" be_dir)" ] && { node_proc_running "$name" be && br="  be: running" || br="  be: stopped"; }
+  ok "$name  fe: $fr$br   ($(njson "$j" domain))"
+}
+
+nodesite_list(){
+  shopt -s nullglob
+  local f found=0
+  for f in "$BH_HOME"/node-sites/*.json; do
+    found=1; local n; n="$(njson "$f" name)"
+    local fr=stopped br=""; node_proc_running "$n" fe && fr=running
+    [ -n "$(njson "$f" be_dir)" ] && { node_proc_running "$n" be && br=" be:running" || br=" be:stopped"; }
+    ok "$(printf '%-16s' "$n") https://$(njson "$f" domain)  fe:$fr$br"
+  done
+  [ "$found" = 0 ] && info "no node sites — omniserv nodesite add <name> --fe-dir <path> --fe-port <n>"
+}
+
+nodesite_rm(){
+  local name="$1"; [ -n "$name" ] || die "usage: omniserv nodesite rm <name>"
+  nodesite_stop "$name" >/dev/null 2>&1 || true
+  rm -f "$BH_HOME/node-sites/$name.json" "$BH_HOME/nginx/sites/$name.conf" "$BH_HOME/nginx/sites/$name.conf.disabled"
+  nginx_running && nginx_reload >/dev/null 2>&1 || true
+  ok "removed node site $name (project files on disk kept)"
+}
+
+nodesite_npm(){ # name [fe|be] [install]
+  local name="$1" part="${2:-fe}" j="$BH_HOME/node-sites/$1.json"
+  [ -f "$j" ] || die "no node site: ${1:-<name>}"
+  local dir; dir="$(njson "$j" ${part}_dir)"
+  [ -n "$dir" ] && [ -d "$dir" ] || die "$part dir not found: $dir"
+  hdr "npm install — $name/$part  ($dir)"
+  ( cd "$dir" && env PATH="$(node_runpath)" npm install ) || die "npm install failed"
+  ok "npm install complete for $name/$part"
+}
+
+cmd_nodesite(){
+  need_init
+  local sub="${1:-list}"; shift || true
+  case "$sub" in
+    add)     nodesite_add "$@" ;;
+    list)    nodesite_list ;;
+    rm|remove) nodesite_rm "$@" ;;
+    start)   nodesite_start "$@" ;;
+    stop)    nodesite_stop "$@" ;;
+    restart) nodesite_stop "$1" >/dev/null 2>&1; nodesite_start "$@" ;;
+    status)  nodesite_status "$@" ;;
+    npm)     nodesite_npm "$@" ;;
+    *) die "usage: omniserv nodesite {add|list|rm|start|stop|restart|status|npm} ..." ;;
+  esac
+}
+
+# ── Python web apps ──────────────────────────────────────────────────────────
+# A Python site = one supervised process (gunicorn/uvicorn/flask/django/…) on a
+# port, with nginx reverse-proxying the domain to it. Same supervision model as
+# node sites (pid file + log), plus optional per-project virtualenv (.venv).
+# Config stored as JSON at $BH_HOME/py-sites/<name>.json (one field per line).
+
+py_proc_running(){ local pidf="$BH_HOME/run/py-$1.pid"; [ -f "$pidf" ] && pid_alive "$(cat "$pidf")"; }
+
+# Resolve a python3 interpreter for venv creation: prefer the OmniServ-installed
+# python@<ver> keg, then any brew python3, then the system one.
+py_python(){
+  local ver="${1:-3.13}" c
+  for c in "$BREW_PREFIX/opt/python@$ver/bin/python3.$ver" "$BREW_PREFIX/opt/python@$ver/bin/python3" "$BREW_PREFIX/bin/python3"; do
+    [ -x "$c" ] && { echo "$c"; return; }
+  done
+  command -v python3 >/dev/null 2>&1 && { command -v python3; return; }
+  echo /usr/bin/python3
+}
+
+# PATH for a python-site process: the project venv (if any) first so `python`,
+# `gunicorn`, `uvicorn`, `flask`, … resolve to it; then the python keg + brew + system.
+py_runpath(){ # dir venv pyver
+  local dir="$1" venv="$2" ver="${3:-3.13}" p=""
+  [ "$venv" = yes ] && [ -d "$dir/.venv/bin" ] && p="$dir/.venv/bin:"
+  echo "${p}$BREW_PREFIX/opt/python@$ver/bin:$BREW_PREFIX/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+}
+
+py_start_proc(){ # name dir cmd port venv pyver
+  local name="$1" dir="$2" cmd="$3" port="$4" venv="$5" ver="$6"
+  [ -n "$cmd" ] && [ -n "$dir" ] || return 0
+  [ -d "$dir" ] || { warn "$name: dir not found ($dir)"; return 1; }
+  py_proc_running "$name" && { ok "$name already running"; return 0; }
+  local pidf="$BH_HOME/run/py-$name.pid" logf="$BH_HOME/logs/py-$name.log"
+  ( cd "$dir" && exec env PATH="$(py_runpath "$dir" "$venv" "$ver")" PORT="$port" \
+       PYTHONUNBUFFERED=1 bash -c "$cmd" ) >>"$logf" 2>&1 &
+  echo $! > "$pidf"
+  ok "$name started (pid $(cat "$pidf"), port $port)  → logs/py-$name.log"
+}
+
+py_stop_proc(){ local pidf="$BH_HOME/run/py-$1.pid"; [ -f "$pidf" ] || return 0; kill_tree "$(cat "$pidf")"; rm -f "$pidf"; }
+
+# Create/refresh a project virtualenv (idempotent).
+py_make_venv(){ # dir pyver
+  local dir="$1" ver="$2"
+  [ -d "$dir/.venv" ] && return 0
+  local py; py="$(py_python "$ver")"
+  hdr "Creating virtualenv (.venv) with $("$py" --version 2>&1)"
+  ( cd "$dir" && "$py" -m venv .venv ) || { warn "venv creation failed — the app will run with the system python"; return 1; }
+  ok "virtualenv ready: $dir/.venv"
+}
+
+# JSON fragment appended to a python site's api row.
+py_api_fields(){
+  local name="$1" j="$BH_HOME/py-sites/$1.json"
+  [ -f "$j" ] || { printf ',"python":false'; return; }
+  local r=false; py_proc_running "$name" && r=true
+  printf ',"python":true,"pyRunning":%s,"pyPort":"%s","pyDir":"%s","pyCmd":"%s","pyVenv":"%s","pyVer":"%s"' \
+    "$r" "$(njson "$j" port)" "$(json_esc "$(njson "$j" dir)")" \
+    "$(json_esc "$(njson "$j" cmd)")" "$(njson "$j" venv)" "$(njson "$j" pyver)"
+}
+
+pysite_add(){
+  local name="$1" dir="" cmd="python app.py" port="" venv="yes" pyver="3.13"
+  shift || true
+  while [ $# -gt 0 ]; do case "$1" in
+    --dir) dir="$2"; shift 2;;  --cmd) cmd="$2"; shift 2;;  --port) port="$2"; shift 2;;
+    --venv) venv="$2"; shift 2;;  --python) pyver="$2"; shift 2;;
+    *) die "unknown flag: $1";;
+  esac; done
+  [ -n "$name" ] || die "usage: omniserv pysite add <name> --dir <path> --port <n> [--cmd \"<run command>\"] [--venv yes|no] [--python 3.13]"
+  printf '%s' "$name" | grep -qE '^[a-z0-9][a-z0-9-]*$' || die "invalid name (lowercase letters, digits, hyphens)"
+  [ -n "$dir" ] && [ -n "$port" ] || die "a python site needs --dir and --port"
+  case "$venv" in yes|no) ;; *) die "--venv must be yes or no" ;; esac
+  pyver="${pyver#python@}"; pyver="${pyver#3.}"; pyver="3.${pyver}"   # accept 3.13 / python@3.13 / 13
+  local tld; tld="$(jget tld test)"; local domain="$name.$tld"
+  mkdir -p "$BH_HOME/py-sites" "$dir"
+  [ "$venv" = yes ] && py_make_venv "$dir" "$pyver" || true
+  cat > "$BH_HOME/py-sites/$name.json" <<JSON
+{
+"name": "$name",
+"domain": "$domain",
+"dir": "$(json_esc "$dir")",
+"cmd": "$(json_esc "$cmd")",
+"port": "$port",
+"venv": "$venv",
+"pyver": "$pyver"
+}
+JSON
+  node_secure "$domain"
+  render_nginx_node_vhost "$name" "$domain" "$port" "" "" python
+  nginx_running && nginx_reload >/dev/null 2>&1 || true
+  hdr "Python site '$name' added"
+  info "url    : https://$domain"
+  info "app    : :$port  ($dir)"
+  info "run    : $cmd"
+  [ "$venv" = yes ] && info "deps   : omniserv pysite pip $name   (installs requirements.txt into .venv)"
+  info "start  : omniserv pysite start $name"
+}
+
+pysite_start(){
+  local name="$1" j="$BH_HOME/py-sites/$1.json"
+  [ -f "$j" ] || die "no python site: ${1:-<name>}"
+  hdr "Starting python site $name"
+  py_start_proc "$name" "$(njson "$j" dir)" "$(njson "$j" cmd)" "$(njson "$j" port)" "$(njson "$j" venv)" "$(njson "$j" pyver)"
+  nginx_running && nginx_reload >/dev/null 2>&1 || nginx_start >/dev/null 2>&1 || true
+  ok "python site $name → https://$(njson "$j" domain)"
+}
+
+pysite_stop(){ local name="$1"; [ -n "$name" ] || die "usage: omniserv pysite stop <name>"; py_stop_proc "$name"; ok "python site $name stopped"; }
+
+pysite_status(){
+  local name="$1" j="$BH_HOME/py-sites/$1.json"
+  [ -f "$j" ] || die "no python site: ${1:-<name>}"
+  local r=stopped; py_proc_running "$name" && r=running
+  ok "$name  app: $r   ($(njson "$j" domain))"
+}
+
+pysite_list(){
+  shopt -s nullglob
+  local f found=0
+  for f in "$BH_HOME"/py-sites/*.json; do
+    found=1; local n; n="$(njson "$f" name)"
+    local r=stopped; py_proc_running "$n" && r=running
+    ok "$(printf '%-16s' "$n") https://$(njson "$f" domain)  app:$r"
+  done
+  [ "$found" = 0 ] && info "no python sites — omniserv pysite add <name> --dir <path> --port <n>"
+}
+
+pysite_rm(){
+  local name="$1"; [ -n "$name" ] || die "usage: omniserv pysite rm <name>"
+  pysite_stop "$name" >/dev/null 2>&1 || true
+  rm -f "$BH_HOME/py-sites/$name.json" "$BH_HOME/nginx/sites/$name.conf" "$BH_HOME/nginx/sites/$name.conf.disabled"
+  nginx_running && nginx_reload >/dev/null 2>&1 || true
+  ok "removed python site $name (project files on disk kept)"
+}
+
+# pip install -r requirements.txt into the project venv.
+pysite_pip(){
+  local name="$1" j="$BH_HOME/py-sites/$1.json"
+  [ -f "$j" ] || die "no python site: ${1:-<name>}"
+  local dir; dir="$(njson "$j" dir)"; local venv; venv="$(njson "$j" venv)"; local ver; ver="$(njson "$j" pyver)"
+  [ -d "$dir" ] || die "dir not found: $dir"
+  [ "$venv" = yes ] || die "this site has no virtualenv (--venv no); install deps yourself"
+  py_make_venv "$dir" "$ver"
+  local pip="$dir/.venv/bin/pip"
+  [ -x "$pip" ] || die "pip not found in .venv — venv may be broken; remove $dir/.venv and re-add"
+  hdr "pip install — $name  ($dir)"
+  if [ -f "$dir/requirements.txt" ]; then
+    ( cd "$dir" && "$pip" install --upgrade pip >/dev/null 2>&1; "$pip" install -r requirements.txt ) || die "pip install failed"
+    ok "dependencies installed for $name"
+  else
+    warn "no requirements.txt in $dir — nothing to install"
+  fi
+}
+
+cmd_pysite(){
+  need_init
+  local sub="${1:-list}"; shift || true
+  case "$sub" in
+    add)       pysite_add "$@" ;;
+    list)      pysite_list ;;
+    rm|remove) pysite_rm "$@" ;;
+    start)     pysite_start "$@" ;;
+    stop)      pysite_stop "$@" ;;
+    restart)   pysite_stop "$1" >/dev/null 2>&1; pysite_start "$@" ;;
+    status)    pysite_status "$@" ;;
+    pip)       pysite_pip "$@" ;;
+    *) die "usage: omniserv pysite {add|list|rm|start|stop|restart|status|pip} ..." ;;
+  esac
+}
+
+render_apache_vhost() {
+  local name="$1" domain="$2" root="$3" phpkey="$4" sock conf
+  sock="$(php_sock "$phpkey")"; conf="$BH_HOME/apache/sites/$name.conf"
+  mkdir -p "$BH_HOME/apache/sites"
+  cat > "$conf" <<APACHE
+# OmniServ Apache backend: $name ($domain) php=$phpkey
+<VirtualHost 127.0.0.1:$APACHE_PORT>
+    ServerName $domain
+    # TLS terminates at nginx; mark proxied-https requests so PHP sees \$_SERVER['HTTPS'].
+    # Without this, https-enforcing apps (FOSSBilling/WHMCS/WordPress) see plain HTTP and
+    # redirect to https forever (ERR_TOO_MANY_REDIRECTS).
+    SetEnvIf X-Forwarded-Proto "https" HTTPS=on
+    DocumentRoot "$root"
+    <Directory "$root">
+        Options Indexes FollowSymLinks
+        AllowOverride All
+        Require all granted
+    </Directory>
+    <FilesMatch \.php\$>
+        SetHandler "proxy:unix:$sock|fcgi://localhost/"
+    </FilesMatch>
+    ErrorLog "$BH_HOME/logs/$name-apache-error.log"
+</VirtualHost>
+APACHE
+  ok "site vhost (apache): $conf"
+}
+
+render_apache_main() {
+  local conf="$BH_HOME/apache/httpd.conf" moddir="$BREW_PREFIX/opt/httpd/lib/httpd/modules"
+  mkdir -p "$BH_HOME/apache/sites"
+  cat > "$conf" <<APACHE
+# Generated by OmniServ — Apache backend behind nginx. Do not edit by hand.
+ServerRoot "$BREW_PREFIX/opt/httpd"
+Listen 127.0.0.1:$APACHE_PORT
+LoadModule mpm_event_module $moddir/mod_mpm_event.so
+LoadModule authz_core_module $moddir/mod_authz_core.so
+LoadModule unixd_module $moddir/mod_unixd.so
+LoadModule dir_module $moddir/mod_dir.so
+LoadModule mime_module $moddir/mod_mime.so
+LoadModule rewrite_module $moddir/mod_rewrite.so
+LoadModule headers_module $moddir/mod_headers.so
+LoadModule setenvif_module $moddir/mod_setenvif.so
+LoadModule log_config_module $moddir/mod_log_config.so
+LoadModule env_module $moddir/mod_env.so
+LoadModule alias_module $moddir/mod_alias.so
+LoadModule proxy_module $moddir/mod_proxy.so
+LoadModule proxy_fcgi_module $moddir/mod_proxy_fcgi.so
+ServerName localhost
+User $USER_NAME
+Group $GROUP_NAME
+PidFile "$BH_HOME/run/httpd.pid"
+DefaultRuntimeDir "$BH_HOME/run"
+TypesConfig "$BREW_PREFIX/etc/httpd/mime.types"
+DirectoryIndex index.php index.html index.htm
+ErrorLog "$BH_HOME/logs/apache-error.log"
+LogLevel warn
+LimitRequestBody 0
+<Directory />
+    AllowOverride none
+    Require all denied
+</Directory>
+IncludeOptional $BH_HOME/apache/sites/*.conf
+APACHE
+  ok "apache main config: $conf"
+}
+
+# ── apache process (internal :8080, no sudo) ─────────────────────────────────
+APACHE_BIN(){ echo "$BREW_PREFIX/opt/httpd/bin/httpd"; }
+apache_running(){ local p="$BH_HOME/run/httpd.pid"; [ -f "$p" ] && pid_alive "$(cat "$p")"; }
+have_apache_sites(){ grep -lq "server=apache" "$BH_HOME"/nginx/sites/*.conf 2>/dev/null; }
+
+# Heal apache vhosts written before the HTTPS=on marker (v1.7.15): re-render any conf
+# missing it, reconstructing the args from the conf itself. Without the marker, https
+# apps behind the apache backend redirect-loop.
+apache_heal_vhosts(){
+  local f name domain root mm
+  for f in "$BH_HOME"/apache/sites/*.conf; do
+    [ -f "$f" ] || continue
+    grep -q 'X-Forwarded-Proto' "$f" && continue
+    name="$(basename "$f" .conf)"
+    domain="$(awk '/ServerName/{print $2; exit}' "$f")"
+    root="$(awk -F'"' '/DocumentRoot/{print $2; exit}' "$f")"
+    mm="$(sed -n 's#.*run/php-\([0-9.]*\)\.sock.*#\1#p' "$f" | head -1)"
+    [ -n "$name" ] && [ -n "$domain" ] && [ -n "$root" ] && [ -n "$mm" ] \
+      && render_apache_vhost "$name" "$domain" "$root" "php@$mm" >/dev/null 2>&1 || true
+  done
+}
+
+apache_start(){
+  local bin; bin="$(APACHE_BIN)"; [ -x "$bin" ] || { warn "httpd not installed — omniserv install httpd"; return 1; }
+  # Clear rogue `httpd --version` daemons: pre-v1.7.13 version probes accidentally launched
+  # httpd with the brew default config (binds *:8080) and those strays block OUR bind. The
+  # match is exact — a legit httpd never runs with `--version` as its argv.
+  pkill -f 'httpd --version' 2>/dev/null || true
+  apache_heal_vhosts
+  render_apache_main
+  if apache_running; then ok "apache already running (:$APACHE_PORT)"; return 0; fi
+  "$bin" -f "$BH_HOME/apache/httpd.conf" -k start && ok "apache started (:$APACHE_PORT)" || no "apache failed to start"
+}
+apache_stop(){
+  local bin; bin="$(APACHE_BIN)"
+  if apache_running; then "$bin" -f "$BH_HOME/apache/httpd.conf" -k stop && ok "apache stopped" || no "apache stop failed"
+  else info "apache not running"; fi
+}
+apache_reload(){ apache_running || return 0; "$(APACHE_BIN)" -f "$BH_HOME/apache/httpd.conf" -k graceful 2>/dev/null && ok "apache reloaded" || true; }
+
+# ── PHP-FPM pools ─────────────────────────────────────────────────────────────
+render_fpm_pool() {
+  local key="$1" label sock conf binp dbsock
+  label="$(php_label "$key")"
+  sock="$(php_sock "$key")"
+  conf="$BH_HOME/php/php-$label.conf"
+  binp="$(php_fpm_bin "$key")"
+  dbsock="$(db_socket)"   # pin so DB_HOST=localhost works on any PHP build (see db_socket)
+  [ -x "$binp" ] || { warn "$key not installed; skipping pool (brew install $(svc_formula "$key"))"; return 1; }
+  mkdir -p "$BH_HOME/tmp/php-sessions-$label"   # pinned session.save_path/upload_tmp_dir/sys_temp_dir
+  cat > "$conf" <<FPM
+; OmniServ PHP-FPM pool — $key
+[global]
+pid = $BH_HOME/run/php-$label.pid
+error_log = $BH_HOME/logs/php-$label.log
+daemonize = yes
+
+[www]
+; Set so php-fpm works whether started as the user (directive ignored) or as root
+; via an elevated 'start all' (workers then drop to the user, not root → sockets stay
+; user-owned so nginx workers can read them).
+user = $USER_NAME
+group = $GROUP_NAME
+listen = $sock
+listen.owner = $USER_NAME
+listen.group = $GROUP_NAME
+listen.mode = 0660
+pm = dynamic
+pm.max_children = 12
+pm.start_servers = 2
+pm.min_spare_servers = 1
+pm.max_spare_servers = 4
+pm.max_requests = 500
+php_admin_value[error_log] = $BH_HOME/logs/php-$label.error.log
+php_admin_flag[log_errors] = on
+; ── OmniServ defaults: big uploads (phpMyAdmin 2GB) + app-friendly limits ──
+php_admin_value[upload_max_filesize] = 2048M
+php_admin_value[post_max_size] = 2048M
+php_admin_value[memory_limit] = 512M
+php_admin_value[max_execution_time] = 600
+php_admin_value[max_input_time] = 600
+php_admin_value[max_input_vars] = 10000
+php_admin_value[date.timezone] = UTC
+php_admin_value[opcache.enable] = 1
+php_admin_value[opcache.memory_consumption] = 192
+php_admin_value[opcache.max_accelerated_files] = 20000
+php_admin_value[realpath_cache_size] = 4096k
+; ── pin sessions/uploads/temp to a OmniServ-writable dir. php_admin_value also beats a
+;    site's .user.ini, so an imported site carrying a server path (session.save_path=
+;    /var/cpanel/php_sessions etc.) can't break sessions here. ──
+php_admin_value[session.save_path] = $BH_HOME/tmp/php-sessions-$label
+php_admin_value[upload_tmp_dir] = $BH_HOME/tmp
+php_admin_value[sys_temp_dir] = $BH_HOME/tmp
+; ── pin the DB socket so DB_HOST=localhost reaches MariaDB on ANY PHP build ──
+; (portable static PHP defaults to /tmp/mysql.sock or empty, which misses a distro
+;  MariaDB on /run/mysqld/mysqld.sock → WordPress "Error establishing a DB connection")
+php_admin_value[mysqli.default_socket] = $dbsock
+php_admin_value[pdo_mysql.default_socket] = $dbsock
+php_admin_value[mysql.default_socket] = $dbsock
+FPM
+  # route mail() to Mailpit when it's installed (sendmail-compatible shim)
+  if svc_installed mailpit; then
+    printf 'php_admin_value[sendmail_path] = %s/bin/mailpit sendmail -t --smtp-addr 127.0.0.1:1025\n' "$BREW_PREFIX" >> "$conf"
+  fi
+  ok "php-fpm pool: $conf  (socket $sock)"
+  # auto-apply: if this pool is already running, restart it so new settings take
+  # effect immediately (sudo-free — FPM runs as the user). Fixes "changed config
+  # but the live pool still has the old values".
+  if fpm_running "$key"; then
+    fpm_stop "$key" >/dev/null 2>&1 || true
+    fpm_start "$key" >/dev/null 2>&1 && ok "php-fpm $key reloaded (new settings)" || true
+  fi
+}
+
+fpm_start(){
+  local key="$1" label conf binp pid
+  label="$(php_label "$key")"; conf="$BH_HOME/php/php-$label.conf"; binp="$(php_fpm_bin "$key")"
+  # Heal a pool conf written before the DB-socket pin (mysqli.default_socket) or the
+  # session/tmp pin (session.save_path) — re-render it once so old pools gain the fixes
+  # on next start/restart without a manual PHP-version switch.
+  if [ -f "$conf" ] && { ! grep -q 'mysqli.default_socket' "$conf" || ! grep -q 'session.save_path' "$conf"; }; then
+    render_fpm_pool "$key" >/dev/null 2>&1 || true
+  fi
+  [ -f "$conf" ] || render_fpm_pool "$key" || return 1
+  [ -x "$binp" ] || { warn "$key php-fpm missing"; return 1; }
+  pid="$BH_HOME/run/php-$label.pid"
+  if [ -f "$pid" ] && pid_alive "$(cat "$pid")"; then ok "php-fpm $key already running (pid $(cat "$pid"))"; return 0; fi
+  # Load OmniServ's per-version conf.d (ionCube etc.) BEFORE the brew defaults (trailing ':'
+  # substitutes the compiled-in scan dir AFTER ours). Order matters: ionCube MUST be the first
+  # zend_extension, and brew ships opcache as a zend_extension in its conf.d — if ours loaded
+  # last, ionCube would fatal with "The Loader must appear as the first entry". Created empty if unused.
+  local cd_dir="$BH_HOME/php/conf.d/$label"; mkdir -p "$cd_dir"
+  PHP_INI_SCAN_DIR="$cd_dir:" "$binp" -y "$conf" -p "$BH_HOME" && ok "php-fpm $key started" || no "php-fpm $key failed to start"
+}
+fpm_stop(){
+  local key="$1" label pid
+  label="$(php_label "$key")"; pid="$BH_HOME/run/php-$label.pid"
+  if [ -f "$pid" ] && pid_alive "$(cat "$pid")"; then kill "$(cat "$pid")" && ok "php-fpm $key stopped"; else info "php-fpm $key not running"; fi
+}
+
+# Which php keys have a generated pool conf?
+fpm_keys(){ ls "$BH_HOME"/php/php-*.conf 2>/dev/null | sed -E 's#.*/php-(.*)\.conf#\1#' | while read -r l; do [ "$l" = default ] && echo php || echo "php@$l"; done; }
+
+# ── sites ─────────────────────────────────────────────────────────────────────
+cmd_site() {
+  need_init
+  local sub="${1:-list}"; shift || true
+  case "$sub" in
+    add) site_add "$@" ;;
+    rm|remove) site_rm "$@" ;;
+    subdomain) site_subdomain "$@" ;;
+    list|ls) site_list ;;
+    php) site_set_php "$@" ;;
+    server) site_set_server "$@" ;;
+    root) site_set_root "$@" ;;
+    enable)  site_toggle "${1:-}" on ;;
+    disable) site_toggle "${1:-}" off ;;
+    *) die "usage: omniserv site {add|rm|subdomain|list|php|server|root|enable|disable}" ;;
+  esac
+}
+
+valid_host(){ printf '%s' "$1" | grep -Eq '^([a-z0-9]([-a-z0-9]*[a-z0-9])?\.)+[a-z0-9]([-a-z0-9]*[a-z0-9])?$'; }
+site_conf_path(){
+  local name="$1" conf="$BH_HOME/nginx/sites/$1.conf" off="$BH_HOME/nginx/sites/$1.conf.disabled"
+  [ -f "$conf" ] && { echo "$conf"; return 0; }
+  [ -f "$off" ] && { echo "$off"; return 0; }
+  return 1
+}
+site_canonical_domain(){ local conf="$1"; vhost_domains "$conf" | head -1; }
+site_alias_host(){
+  local site="$1" raw="$2" conf domain tld host
+  conf="$(site_conf_path "$site")" || die "no site '$site'"
+  domain="$(site_canonical_domain "$conf")"; tld="$(jget tld test)"
+  raw="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
+  case "$raw" in
+    *.*) host="$raw" ;;
+    *) host="$raw.$domain" ;;
+  esac
+  case "$host" in *."$tld") ;; *) die "subdomain must end in .$tld";; esac
+  valid_host "$host" || die "invalid subdomain '$raw'"
+  [ "$host" != "$domain" ] || die "subdomain matches canonical domain"
+  echo "$host"
+}
+site_subdomain_conflict(){
+  local site="$1" host="$2" f n d
+  shopt -s nullglob
+  for f in "$BH_HOME"/nginx/sites/*.conf "$BH_HOME"/nginx/sites/*.conf.disabled; do
+    n="$(basename "$f")"; n="${n%.disabled}"; n="${n%.conf}"
+    [ "$n" = "$site" ] && continue
+    vhost_domains "$f" | grep -Fxq "$host" && return 0
+  done
+  return 1
+}
+site_subdomain_apply_names(){
+  local conf="$1" domain="$2"; shift 2
+  local names="$domain"
+  [ $# -gt 0 ] && names="$names $*"
+  sedi "s/^[[:space:]]*server_name .*/    server_name $names;/" "$conf"
+}
+site_subdomain_reissue_if_secure(){
+  local conf="$1" domain="$2"
+  grep -q "ssl_certificate " "$conf" || return 0
+  if svc_installed mkcert; then
+    local mkc="$BREW_PREFIX/bin/mkcert"
+    mkdir -p "$BH_HOME/certs"
+    ( cd "$BH_HOME/certs" && "$mkc" -cert-file "$domain.pem" -key-file "$domain-key.pem" $(vhost_domains "$conf") ) \
+      && ok "certificate reissued for $(vhost_domains "$conf" | tr '\n' ' ')" \
+      || warn "could not reissue HTTPS certificate (run: omniserv resecure $domain)"
+  else
+    warn "mkcert not installed — HTTPS aliases need: omniserv resecure $domain"
+  fi
+}
+site_subdomain_apply_reload(){
+  local conf="$1"
+  if grep -q "ssl_certificate " "$conf"; then
+    hosts_sync_all
+    nginx_restart >/dev/null 2>&1 || warn "restart nginx (omniserv restart nginx)"
+  else
+    maybe_reload_nginx
+  fi
+}
+site_subdomain(){
+  local action="${1:-list}" site="${2:-}" raw="${3:-}" conf domain host aliases
+  [ -n "$site" ] || die "usage: omniserv site subdomain {list|add|rm} <site> [label-or-host]"
+  conf="$(site_conf_path "$site")" || die "no site '$site'"
+  domain="$(site_canonical_domain "$conf")"
+  case "$action" in
+    list|"")
+      aliases="$(vhost_aliases "$conf" "$domain")"
+      [ -n "$aliases" ] && printf '%s\n' "$aliases" || info "no subdomains for $site"
+      ;;
+    add)
+      [ -n "$raw" ] || die "usage: omniserv site subdomain add <site> <label-or-host>"
+      host="$(site_alias_host "$site" "$raw")"
+      vhost_aliases "$conf" "$domain" | grep -Fxq "$host" && die "$host already exists on $site"
+      site_subdomain_conflict "$site" "$host" && die "$host is already used by another site"
+      aliases="$(printf '%s\n%s\n' "$(vhost_aliases "$conf" "$domain")" "$host" | awk 'NF' | sort -u)"
+      site_subdomain_apply_names "$conf" "$domain" $aliases
+      site_subdomain_reissue_if_secure "$conf" "$domain"
+      ok "subdomain added: $host → $domain"
+      site_subdomain_apply_reload "$conf"
+      ;;
+    rm|remove)
+      [ -n "$raw" ] || die "usage: omniserv site subdomain rm <site> <label-or-host>"
+      host="$(site_alias_host "$site" "$raw")"
+      vhost_aliases "$conf" "$domain" | grep -Fxq "$host" || die "$host is not a subdomain of $site"
+      aliases="$(vhost_aliases "$conf" "$domain" | grep -Fxv "$host" || true)"
+      site_subdomain_apply_names "$conf" "$domain" $aliases
+      site_subdomain_reissue_if_secure "$conf" "$domain"
+      ok "subdomain removed: $host"
+      site_subdomain_apply_reload "$conf"
+      ;;
+    *) die "usage: omniserv site subdomain {list|add|rm} <site> [label-or-host]" ;;
+  esac
+}
+
+# Switch a site between nginx (direct) and apache (proxy + .htaccess).
+site_set_server() {
+  [ $# -ge 2 ] || die "usage: omniserv site server <name> <nginx|apache>"
+  local name="$1" newsrv="$2"; valid_site_name "$name"
+  local conf="$BH_HOME/nginx/sites/$1.conf"
+  [ -f "$conf" ] || die "no site '$name'"
+  case "$newsrv" in nginx|apache) ;; *) die "server must be nginx or apache" ;; esac
+  [ "$newsrv" != apache ] || svc_installed httpd || die "apache needs httpd — omniserv install httpd"
+  local domain root php
+  domain="$(awk '/server_name/{print $2; exit}' "$conf" | tr -d ';')"
+  root="$(vhost_root_read "$conf")"
+  php="$(sed -n 's/.*php=\([^[:space:]]*\).*/\1/p' "$conf" | head -1)"
+  [ "$newsrv" = nginx ] && rm -f "$BH_HOME/apache/sites/$name.conf"
+  render_site_vhost "$name" "$domain" "$root" "$php" "$newsrv"
+  [ "$newsrv" = apache ] && apache_start >/dev/null 2>&1 || true
+  ok "$name now served by $newsrv"
+  apache_reload; maybe_reload_nginx
+}
+
+# Enable/disable serving a site by toggling its vhost file extension
+# (nginx only includes *.conf). Caller reloads nginx to apply.
+site_toggle(){
+  local name="$1" mode="$2"
+  [ -n "$name" ] || die "usage: omniserv site {enable|disable} <name>"
+  valid_site_name "$name"
+  local on="$BH_HOME/nginx/sites/$name.conf" off="$BH_HOME/nginx/sites/$name.conf.disabled"
+  if [ "$mode" = off ]; then
+    [ -f "$on" ] && mv "$on" "$off" && ok "disabled $name" || warn "$name already disabled / missing"
+  else
+    [ -f "$off" ] && mv "$off" "$on" && ok "enabled $name" || warn "$name already enabled / missing"
+  fi
+  maybe_reload_nginx
+}
+
+# Switch a site's PHP version: re-render its vhost against the new pool socket,
+# ensure that pool exists + is running, then reload nginx (caller/GUI does that).
+site_set_php() {
+  [ $# -ge 2 ] || die "usage: omniserv site php <name> <8.4|php@8.4>"
+  local name="$1" newphp="$2"; valid_site_name "$name"
+  local conf="$BH_HOME/nginx/sites/$1.conf"
+  [ -f "$conf" ] || die "no site '$name'"
+  local domain root phpkey server
+  domain="$(awk '/server_name/{print $2; exit}' "$conf" | tr -d ';')"
+  root="$(vhost_root_read "$conf")"
+  server="$(vhost_server "$conf")"
+  phpkey="$(php_key "$newphp")"
+  svc_installed "$phpkey" || die "$phpkey not installed (omniserv install $phpkey)"
+  render_fpm_pool "$phpkey" || true
+  fpm_start "$phpkey" >/dev/null 2>&1 || true
+  render_site_vhost "$name" "$domain" "$root" "$phpkey" "$server"
+  ok "$name now uses $phpkey"
+  [ "$server" = apache ] && apache_reload || true
+  maybe_reload_nginx
+}
+
+# Change a site's document root: re-render its vhost with the new root.
+site_set_root() {
+  [ $# -ge 2 ] || die "usage: omniserv site root <name> <path>"
+  local name="$1" newroot="$2"; valid_site_name "$name"
+  local conf="$BH_HOME/nginx/sites/$1.conf"
+  [ -f "$conf" ] || die "no site '$name'"
+  case "$newroot" in /*) ;; *) die "root must be an absolute path" ;; esac
+  valid_site_root "$newroot"
+  local domain phpkey server
+  domain="$(awk '/server_name/{print $2; exit}' "$conf" | tr -d ';')"
+  phpkey="$(sed -n 's/.*php=\([^[:space:]]*\).*/\1/p' "$conf" | head -1)"
+  server="$(vhost_server "$conf")"
+  mkdir -p "$newroot"
+  render_site_vhost "$name" "$domain" "$newroot" "$phpkey" "$server"
+  ok "$name root → $newroot"
+  [ "$server" = apache ] && apache_reload || true
+  maybe_reload_nginx
+}
+
+# server type recorded in the vhost comment (default nginx for older vhosts)
+vhost_server(){ local s; s="$(sed -n 's/.*server=\([^ ]*\).*/\1/p' "$1" | head -1)"; echo "${s:-nginx}"; }
+
+site_add() {
+  local name="" root="" phpv="" server="" type="others"
+  [ $# -ge 1 ] || die "usage: omniserv site add <name> [--php 8.4] [--root path] [--server nginx|apache] [--type wordpress|php|laravel|others]"
+  name="$1"; shift
+  while [ $# -gt 0 ]; do case "$1" in
+    --php) phpv="$2"; shift 2;;
+    --root) root="$2"; shift 2;;
+    --server) server="$2"; shift 2;;
+    --type) type="$2"; shift 2;;
+    *) die "unknown flag: $1";;
+  esac; done
+  valid_site_name "$name"; valid_site_root "$root"
+  case "$type" in wordpress|php|laravel|others) ;; *) die "--type must be wordpress|php|laravel|others" ;; esac
+  local tld; tld="$(jget tld test)"
+  local domain="$name.$tld"
+  [ -n "$root" ] || root="$(jget sites_root "$HOME/OmniServ/www")/$name"
+  [ -n "$server" ] || server="$(jget default_web nginx)"
+  local phpkey; phpkey="$(php_key "$phpv")"
+  local vhost_root="$root"
+  [ "$type" = "laravel" ] && vhost_root="$root/public"
+
+  mkdir -p "$vhost_root"
+  # Branded default landing page (identical to the Windows build). Quoted heredoc
+  # so the PHP `$…` is written literally, not shell-expanded. Written to the DOCUMENT
+  # ROOT ($vhost_root) — for Laravel that's $root/public, not $root.
+  [ -f "$vhost_root/index.php" ] || [ -f "$vhost_root/index.html" ] || cat > "$vhost_root/index.php" <<'PHP'
+<?php // OmniServ default page - replace this index.php with your own site. ?>
+<!doctype html>
+<html lang='en'>
+<head>
+<meta charset='utf-8'>
+<meta name='viewport' content='width=device-width, initial-scale=1'>
+<title>Welcome to Your New Site!</title>
+<style>
+  body { font-family:Arial, sans-serif; margin:0; padding:0; display:flex; justify-content:center; align-items:center; min-height:100vh; background-color:#f8f8f8; }
+  .container { max-width:600px; width:90%; padding:32px 20px; background:#fff; border-radius:10px; box-shadow:0 4px 8px rgba(0,0,0,.1); text-align:center; }
+  h1 { color:#20a53a; margin:0 0 6px; }
+  h3 { color:#555; font-weight:normal; }
+  ul { list-style-type:none; padding:0; }
+  ul li { margin:10px 0; font-size:16px; color:#444; }
+  code { background:#eef7ee; color:#20a53a; padding:1px 6px; border-radius:4px; }
+</style>
+</head>
+<body>
+  <div class='container'>
+    <h1>🎉 Congratulations!<br>Your website is live now!</h1>
+    <h3>This default page has been automatically generated.</h3>
+    <ul>
+      <li>Your site's <code>index.php</code> file is located in the root directory.</li>
+      <li>Feel free to modify, delete, or replace this page to customize your site!</li>
+    </ul>
+  </div>
+</body>
+</html>
+PHP
+
+  case "$server" in nginx|apache) ;; *) die "--server must be nginx or apache" ;; esac
+  svc_installed httpd || [ "$server" != apache ] || die "apache backend needs httpd — omniserv install httpd"
+
+  render_fpm_pool "$phpkey" || true
+  fpm_start "$phpkey" >/dev/null 2>&1 || true   # ensure the site's PHP pool is up (no 502)
+  render_site_vhost "$name" "$domain" "$vhost_root" "$phpkey" "$server"
+  # apache_start no-ops when httpd is already up, so the FIRST apache site worked but every
+  # LATER one was never loaded (requests fell through to the first vhost). Reload when running.
+  if [ "$server" = apache ]; then
+    if apache_running; then apache_reload >/dev/null 2>&1 || true; else apache_start >/dev/null 2>&1 || true; fi
+  fi
+  hdr "Site '$name' added"
+  info "domain : http://$domain"
+  info "root   : $root"
+  [ "$vhost_root" != "$root" ] && info "vhost  : $vhost_root"
+  info "php    : $phpkey   server: $server   type: $type"
+
+  site_provision "$name" "$type" "$root" "$domain"
+  site_autosecure "$name" "$domain"
+  maybe_reload_nginx
+}
+
+# Sanitized DB name from a site name (mysql-safe).
+db_dbname(){ local d="${1//[^A-Za-z0-9_]/_}"; echo "$d"; }
+
+# Make sure a DB server is up; ensure root@localhost is blank-password (the
+# convention: apps connect as root, no password). Returns 0 if usable.
+db_ready_rootblank(){
+  svc_installed mariadb || svc_installed mysql || return 1
+  if [ ! -S /tmp/mysql.sock ]; then
+    brew_svc start mariadb >/dev/null 2>&1 || brew_svc start mysql >/dev/null 2>&1 || true
+    local i; for i in $(seq 1 15); do [ -S /tmp/mysql.sock ] && break; sleep 1; done
+  fi
+  [ -S /tmp/mysql.sock ] || return 1
+  mysql_run -e "ALTER USER 'root'@'localhost' IDENTIFIED BY ''; FLUSH PRIVILEGES;" >/dev/null 2>&1 || true
+  return 0
+}
+
+# Per-type provisioning: WordPress (DB + files + wp-config), PHP (DB), others (—).
+site_provision(){
+  local name="$1" type="$2" root="$3" domain="$4"
+  [ "$type" = others ] && return 0
+  local db; db="$(db_dbname "$name")"
+  if ! db_ready_rootblank; then
+    warn "no DB server running — install/start MariaDB, then create DB '$db' yourself"
+    return 0
+  fi
+  mysql_run -e "CREATE DATABASE IF NOT EXISTS \`$db\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" \
+    && ok "database '$db' ready  (user: root · password: none · host: localhost)" \
+    || warn "could not create database '$db'"
+  [ "$type" = wordpress ] && site_install_wordpress "$root" "$db"
+  # Always return success: for a non-WordPress site the test above is FALSE (returns 1), which under
+  # `set -e` would ABORT site_add before maybe_reload_nginx — so the vhost is written + DB created but
+  # nginx never reloads and /etc/hosts never syncs → the new site doesn't load until a manual restart.
+  return 0
+}
+
+# Download latest WordPress into the site root and pre-write wp-config.php.
+site_install_wordpress(){
+  local root="$1" db="$2"
+  if [ -f "$root/wp-load.php" ]; then ok "WordPress already present"; return 0; fi
+  hdr "Downloading WordPress (latest)"
+  local tmp; tmp="$(mktemp -d)"
+  if ! curl -fsSL https://wordpress.org/latest.zip -o "$tmp/wp.zip"; then warn "WP download failed"; rm -rf "$tmp"; return 0; fi
+  unzip -q "$tmp/wp.zip" -d "$tmp" || { warn "WP unzip failed"; rm -rf "$tmp"; return 0; }
+  cp -R "$tmp/wordpress/." "$root/"
+  rm -f "$root/index.php.omniserv" 2>/dev/null || true
+  rm -rf "$tmp"
+  ok "WordPress extracted to $root"
+  # wp-config.php from the sample: DB=root/none/localhost + fresh salts
+  if [ -f "$root/wp-config-sample.php" ] && [ ! -f "$root/wp-config.php" ]; then
+    cp "$root/wp-config-sample.php" "$root/wp-config.php"
+    sedi "s/database_name_here/$db/; s/username_here/root/; s/'password_here'/''/" "$root/wp-config.php"
+    local salts; salts="$(curl -fsSL https://api.wordpress.org/secret-key/1.1/salt/ 2>/dev/null || true)"
+    if [ -n "$salts" ]; then
+      # Inject the salt block by reading it from a FILE via getline — NOT `awk -v s=...`.
+      # BSD awk chokes on a multi-line `-v` value ("newline in string") and silently drops
+      # the salts; getline also avoids any backslash/`$`/`&` escape processing, so the salts
+      # (which contain every special char) land verbatim and wp-config.php stays valid PHP.
+      local saltfile="$root/.omniserv-salts.tmp"
+      printf '%s\n' "$salts" > "$saltfile"
+      awk -v sf="$saltfile" '/put your unique phrase here/{ if(!d){ while((getline line < sf) > 0) print line; close(sf); d=1 } next } {print}' \
+        "$root/wp-config.php" > "$root/wp-config.php.tmp" && mv "$root/wp-config.php.tmp" "$root/wp-config.php"
+      rm -f "$saltfile"
+    fi
+    ok "wrote wp-config.php — visit the site and just set the title + admin user"
+  fi
+}
+
+# Auto-issue a trusted cert if the mkcert CA is already installed (no prompt).
+site_autosecure(){
+  local name="$1" domain="$2"
+  svc_installed mkcert || return 0
+  local caroot; caroot="$("$BREW_PREFIX/bin/mkcert" -CAROOT 2>/dev/null)"
+  [ -n "$caroot" ] && [ -f "$caroot/rootCA.pem" ] || { info "https: omniserv secure $domain"; return 0; }
+  ( cd "$BH_HOME/certs" && "$BREW_PREFIX/bin/mkcert" -cert-file "$domain.pem" -key-file "$domain-key.pem" "$domain" ) >/dev/null 2>&1 \
+    && { local root php server; root="$(vhost_root_read "$BH_HOME/nginx/sites/$name.conf")"
+         php="$(sed -n 's/.*php=\([^[:space:]]*\).*/\1/p' "$BH_HOME/nginx/sites/$name.conf" | head -1)"
+         server="$(vhost_server "$BH_HOME/nginx/sites/$name.conf")"
+         render_site_vhost "$name" "$domain" "$root" "$php" "$server"; ok "HTTPS enabled (mkcert)"; } \
+    || info "https: omniserv secure $domain"
+}
+
+site_rm() {
+  local name="" purge=0
+  while [ $# -gt 0 ]; do case "$1" in --purge) purge=1; shift;; *) name="$1"; shift;; esac; done
+  [ -n "$name" ] || die "usage: omniserv site rm <name> [--purge]"
+  valid_site_name "$name"
+  # capture the doc root BEFORE deleting the vhost (needed for --purge file deletion)
+  local conf="$BH_HOME/nginx/sites/$name.conf" root=""
+  [ -f "$conf" ] && root="$(vhost_root_read "$conf")"
+  rm -f "$BH_HOME/nginx/sites/$name.conf" "$BH_HOME/nginx/sites/$name.conf.disabled" \
+        "$BH_HOME/apache/sites/$name.conf"
+  ok "removed vhost for $name"
+  if [ "$purge" = 1 ]; then
+    # drop the site's database (named after the site) + its user
+    local db; db="$(db_dbname "$name")"
+    if mysql_run -e "DROP DATABASE IF EXISTS \`$db\`; DROP USER IF EXISTS '$(mysql_esc "$db")'@'localhost';" 2>/dev/null; then
+      ok "dropped database '$db'"
+    else warn "couldn't drop database '$db' (server not running?)"; fi
+    # delete the site files — ONLY if the root is inside the user's home. Canonicalize
+    # first (resolve symlinks + ..) so a crafted root like "$HOME/../etc" can't escape.
+    if [ -n "$root" ] && [ -d "$root" ]; then
+      local realroot realhome
+      realroot="$(cd "$root" 2>/dev/null && pwd -P)" || realroot=""
+      realhome="$(cd "$HOME" 2>/dev/null && pwd -P)" || realhome="$HOME"
+      if [ -n "$realroot" ] && [ "$realroot" != "$realhome" ] && [ "${realroot#"$realhome"/}" != "$realroot" ]; then
+        rm -rf "$realroot" && ok "deleted files: $realroot" || warn "couldn't delete $realroot"
+      else
+        warn "left files in place — root isn't safely inside your home folder: $root"
+      fi
+    fi
+  else
+    info "(site files + database left in place)"
+  fi
+  maybe_reload_nginx
+  apache_reload
+}
+
+site_list() {
+  hdr "OmniServ sites"
+  shopt -s nullglob
+  local found=0
+  for f in "$BH_HOME"/nginx/sites/*.conf; do
+    found=1
+    local n; n="$(basename "$f" .conf)"
+    local dom; dom="$(awk '/server_name/{print $2; exit}' "$f" | tr -d ';')"
+    local php; php="$(sed -n 's/.*php=\([^[:space:]]*\).*/\1/p' "$f" | head -1)"
+    local sec="http"; grep -q "ssl_certificate " "$f" && sec="https"
+    ok "$(printf '%-18s' "$n") ${c_dim}$dom  [$php]  $sec${c_reset}"
+  done
+  [ "$found" = 1 ] || info "no sites yet — omniserv site add <name>"
+}
+
+# ── DNS (*.test via dnsmasq) ────────────────────────────────────────────────
+# Running = an actual dnsmasq process (NOT `brew services list`, which reports a stale
+# "error" state even while the root LaunchDaemon is happily serving :53).
+dnsmasq_running(){ pgrep -x dnsmasq >/dev/null 2>&1; }
+
+# Configure + (re)start dnsmasq so *.tld → 127.0.0.1. Needs root (binds :53, writes
+# /etc/resolver). Invoked privileged (osascript admin) by the app, or via `sudo omniserv dns`.
+# Idempotent: if dnsmasq is already running it just reloads; else it starts it directly.
+cmd_dns() {
+  need_init
+  local tld; tld="$(jget tld test)"
+  # tld is written (as root) into /etc/resolver/<tld> and dnsmasq config — never let a
+  # hand-edited config slip a path (/, ..) or shell-ish value into a privileged write.
+  printf '%s' "$tld" | grep -qE '^[a-z][a-z0-9-]*$' || die "invalid tld '$tld' (lowercase letters, digits, hyphens only)"
+  svc_installed dnsmasq || die "dnsmasq not installed — run: omniserv install dnsmasq"
+  if [ "$(id -u)" != 0 ]; then
+    die "DNS setup needs admin — use the app's dnsmasq Start (it prompts), or: sudo omniserv dns"
+  fi
+  hdr "Configuring *.$tld DNS (dnsmasq)"
+  # 1) tell dnsmasq to answer *.tld with 127.0.0.1 (brew dnsmasq reads etc/dnsmasq.d/*.conf)
+  mkdir -p "$BREW_PREFIX/etc/dnsmasq.d"
+  printf '# OmniServ — resolve *.%s → 127.0.0.1\naddress=/.%s/127.0.0.1\n' "$tld" "$tld" \
+    > "$BREW_PREFIX/etc/dnsmasq.d/omniserv.conf"
+  grep -q 'dnsmasq.d' "$BREW_PREFIX/etc/dnsmasq.conf" 2>/dev/null \
+    || printf 'conf-dir=%s/etc/dnsmasq.d,*.conf\n' "$BREW_PREFIX" >> "$BREW_PREFIX/etc/dnsmasq.conf"
+  ok "dnsmasq config: $BREW_PREFIX/etc/dnsmasq.d/omniserv.conf"
+  # 2) route *.tld lookups on macOS to our local resolver
+  mkdir -p /etc/resolver
+  printf 'nameserver 127.0.0.1\n' > "/etc/resolver/$tld"
+  ok "resolver: /etc/resolver/$tld → 127.0.0.1"
+  # 3) start (or reload) dnsmasq. Already running → SIGHUP to reload; else start the daemon.
+  local bin; bin="$BREW_PREFIX/sbin/dnsmasq"; [ -x "$bin" ] || bin="$BREW_PREFIX/bin/dnsmasq"
+  if dnsmasq_running; then
+    pkill -HUP -x dnsmasq 2>/dev/null || true; ok "dnsmasq reloaded — *.$tld now resolves to 127.0.0.1"
+  else
+    "$bin" -C "$BREW_PREFIX/etc/dnsmasq.conf" >/dev/null 2>&1 \
+      && ok "dnsmasq started — *.$tld now resolves to 127.0.0.1" \
+      || no "dnsmasq failed to start (is something else on :53? try: sudo lsof -i :53)"
+  fi
+  # flush the macOS DNS cache so the new resolver takes effect immediately
+  dscacheutil -flushcache 2>/dev/null || true
+  killall -HUP mDNSResponder 2>/dev/null || true
+}
+
+# Stop the dnsmasq daemon (root). *.tld resolution stops until it's started again.
+dnsmasq_stop(){
+  [ "$(id -u)" = 0 ] || { warn "stopping dnsmasq needs admin"; return 0; }
+  pkill -x dnsmasq 2>/dev/null || true; ok "dnsmasq stopped"
+}
+
+# ── HTTPS (mkcert) ──────────────────────────────────────────────────────────
+cmd_secure() {
+  need_init
+  [ $# -ge 1 ] || die "usage: omniserv secure <domain>   (e.g. myapp.test)"
+  svc_installed mkcert || die "mkcert not installed — run: omniserv install mkcert"
+  local mkc="$BREW_PREFIX/bin/mkcert" domain="$1"
+  hdr "Provisioning trusted cert for $domain"
+  if [ ! -d "$("$mkc" -CAROOT)" ] || [ ! -f "$("$mkc" -CAROOT)/rootCA.pem" ]; then
+    warn "local CA not installed yet — running 'mkcert -install' (will prompt for sudo/keychain)"
+    "$mkc" -install || die "mkcert -install failed"
+  fi
+  local names="$domain"
+  local conf="$BH_HOME/nginx/sites/${domain%.$(jget tld test)}.conf"
+  [ -f "$conf" ] && names="$(vhost_domains "$conf" | tr '\n' ' ')"
+  ( cd "$BH_HOME/certs" && "$mkc" -cert-file "$domain.pem" -key-file "$domain-key.pem" $names ) \
+    && ok "cert: $BH_HOME/certs/$domain.pem" || die "mkcert failed"
+  _rerender_site_vhost "$domain"
+  ok "secured: https://$domain"
+}
+
+# Re-render a site's vhost for the CURRENT cert state (proxy/node/python/php aware), then RESTART
+# nginx. The renderers emit the ssl block only when the cert file exists (nginx_listen_block), so
+# this turns HTTPS ON after a secure and OFF after an unsecure — one code path for both.
+# Full restart, NOT reload: a reload leaves OLD workers serving the PREVIOUS cert on kept-alive
+# connections (up to keepalive_timeout, ~65s), so REMOVING https looked like it did nothing until a
+# manual restart-all. stop+start kills those workers so secure/unsecure/resecure apply instantly.
+_rerender_site_vhost() {
+  local domain="$1" tld name conf
+  tld="$(jget tld test)"
+  # Strip the TLD suffix, NOT to the first label — else a multi-label site (api.myapp.test) resolves
+  # to "api" and its api.myapp.conf is never found, so the re-render silently no-ops.
+  name="${domain%.$tld}"
+  conf="$BH_HOME/nginx/sites/$name.conf"
+  if [ -f "$BH_HOME/py-sites/$name.json" ]; then
+    render_nginx_node_vhost "$name" "$domain" "$(njson "$BH_HOME/py-sites/$name.json" port)" "" "" python
+  elif [ -f "$BH_HOME/node-sites/$name.json" ]; then
+    local j="$BH_HOME/node-sites/$name.json"
+    render_nginx_node_vhost "$name" "$domain" "$(njson "$j" fe_port)" "$(njson "$j" be_port)" "$(njson "$j" api_paths)"
+  elif [ -f "$conf" ]; then
+    local root php server
+    server="$(vhost_server "$conf")"
+    if [ "$server" = proxy ]; then
+      local port; port="$(sed -n 's#.*proxy_pass http://127.0.0.1:\([0-9]*\).*#\1#p' "$conf" | head -1)"
+      render_nginx_proxy_site "$name" "$domain" "${port:-8025}"
+    else
+      root="$(vhost_root_read "$conf")"
+      php="$(sed -n 's/.*php=\([^[:space:]]*\).*/\1/p' "$conf" | head -1)"
+      render_site_vhost "$name" "$domain" "$root" "$php" "$server"
+    fi
+  else
+    return 0   # no vhost for this domain — cert changed but nothing to re-render
+  fi
+  hosts_sync_all
+  nginx_restart >/dev/null 2>&1 || warn "restart nginx (omniserv restart nginx)"
+}
+
+# Reliable stop→start for cert changes. `nginx -s stop` is ASYNC — the master can keep :80/:443
+# bound for a moment after it returns, so a back-to-back nginx_start may (a) no-op because its
+# `nginx_running` guard still sees the dying master, or (b) fail to bind (EADDRINUSE). That's why
+# SSL secure/unsecure sometimes "didn't apply until a restart-all" (the restart-all path stops/
+# starts OTHER services in between = enough delay for the old master to exit). Here: stop, WAIT
+# until the master is truly gone (pgrep by config path — survives a stale pid file), then start.
+nginx_restart(){
+  # If we can't gain privilege for :80/:443 — the macOS GUI runs this verb UNPRIVILEGED and does its
+  # OWN privileged nginx restart afterwards — don't spin waiting to stop a root-owned master we can't
+  # signal. Fall back to the old fast stop→start (a no-op there) and let the caller's restart apply it.
+  if needs_root_ports && [ "$(id -u)" != 0 ] && ! sudo -n true 2>/dev/null; then
+    nginx_stop >/dev/null 2>&1 || true; nginx_start; return
+  fi
+  nginx_stop >/dev/null 2>&1 || true
+  local pre="" i=0; needs_root_ports && pre="sudo"
+  while pgrep -f "nginx: master.*$BH_HOME/nginx/nginx.conf" >/dev/null 2>&1; do
+    i=$((i+1))
+    if [ "$i" -ge 30 ]; then   # ~3s grace, then force-kill a stuck master so start can bind
+      $pre pkill -9 -f "nginx: master.*$BH_HOME/nginx/nginx.conf" 2>/dev/null || true
+      sleep 0.3; break
+    fi
+    sleep 0.1
+  done
+  rm -f "$BH_HOME/run/nginx.pid" 2>/dev/null || true
+  nginx_start
+}
+
+# Remove HTTPS from a site: delete its cert + key and re-render the vhost (drops the ssl block
+# since the cert files are gone). The site keeps serving over http. Use resecure for a fresh cert.
+cmd_unsecure() {
+  need_init
+  [ $# -ge 1 ] || die "usage: omniserv unsecure <domain>"
+  local domain="$1"
+  hdr "Removing HTTPS from $domain"
+  [ -f "$BH_HOME/certs/$domain.pem" ] && ok "certificate removed" || info "no certificate found (already http-only)"
+  rm -f "$BH_HOME/certs/$domain.pem" "$BH_HOME/certs/$domain-key.pem"
+  _rerender_site_vhost "$domain"
+  ok "unsecured: http://$domain"
+}
+
+# Reinstall HTTPS: drop the old cert + key and issue a completely fresh one (new key + serial).
+# The GUI remedy when a site's certificate shows as untrusted (AV/OS trust hiccup).
+cmd_resecure() {
+  need_init
+  [ $# -ge 1 ] || die "usage: omniserv resecure <domain>"
+  hdr "Reinstalling HTTPS for $1"
+  rm -f "$BH_HOME/certs/$1.pem" "$BH_HOME/certs/$1-key.pem"
+  cmd_secure "$1"
+}
+
+# ── process management ──────────────────────────────────────────────────────
+# Rewrite ONLY bare-port listen lines (e.g. "listen 80;") to loopback, in place.
+# Never re-renders a vhost, so it can't corrupt proxy/tool sites (mailpit/pma/adminer).
+# The `[0-9]+` anchor won't match an already-migrated "listen 127.0.0.1:80;" (has dots).
+migrate_vhost_binds(){
+  shopt -s nullglob
+  local f
+  for f in "$BH_HOME"/nginx/sites/*.conf; do
+    sedi -E 's/^([[:space:]]*)listen ([0-9]+)( ssl)?;/\1listen 127.0.0.1:\2\3;/' "$f" 2>/dev/null || true
+  done
+}
+NGINX_BIN(){ echo "$BREW_PREFIX/bin/nginx"; }
+nginx_running(){ local p="$BH_HOME/run/nginx.pid"; [ -f "$p" ] && pid_alive "$(cat "$p")"; }
+needs_root_ports(){ local h; h="$(jget http_port 80)"; [ "$h" -lt 1024 ]; }
+
+nginx_start(){
+  render_nginx_main "$(jget http_port 80)"
+  migrate_vhost_binds   # migrate any old 0.0.0.0 listen lines to 127.0.0.1 (safe, in-place — no re-render)
+  local bin; bin="$(NGINX_BIN)"; [ -x "$bin" ] || die "nginx not installed — omniserv install nginx"
+  if nginx_running; then ok "nginx already running (pid $(cat "$BH_HOME/run/nginx.pid"))"; return; fi
+  local pre=""; needs_root_ports && pre="sudo" || true
+  # Validate SYNTAX only: `nginx -t` also tries to bind, which fails unprivileged on
+  # 127.0.0.1:80 (exit non-zero) — but it still prints "syntax is ok". The `|| true` is
+  # ESSENTIAL: without it the failing assignment trips `set -e` and aborts the whole
+  # start before we ever launch nginx (the real start below runs with sudo and binds).
+  local t; t="$("$bin" -t -c "$BH_HOME/nginx/nginx.conf" -p "$BH_HOME/nginx" 2>&1)" || true
+  grep -q "syntax is ok" <<<"$t" || { printf '%s\n' "$t"; die "nginx config test failed"; }
+  $pre "$bin" -c "$BH_HOME/nginx/nginx.conf" -p "$BH_HOME/nginx" && ok "nginx started${pre:+ (sudo)}" || no "nginx failed to start"
+}
+nginx_reload(){
+  nginx_running || return 0
+  local bin pre=""; bin="$(NGINX_BIN)"; needs_root_ports && pre="sudo"
+  if $pre "$bin" -s reload -c "$BH_HOME/nginx/nginx.conf" -p "$BH_HOME/nginx" 2>/dev/null; then
+    ok "nginx reloaded"
+  else
+    # graceful reload is the primary path; full restart only as a fallback
+    nginx_restart >/dev/null 2>&1 && ok "nginx restarted" || warn "reload failed — run: omniserv restart nginx"
+  fi
+}
+# Auto-apply config changes
+maybe_reload_nginx(){
+  nginx_running || return 0
+  nginx_reload
+}
+
+nginx_stop(){
+  local bin pre=""; bin="$(NGINX_BIN)"; needs_root_ports && pre="sudo"
+  if nginx_running; then
+    $pre "$bin" -s stop -c "$BH_HOME/nginx/nginx.conf" -p "$BH_HOME/nginx" 2>/dev/null \
+      || $pre kill "$(cat "$BH_HOME/run/nginx.pid")" 2>/dev/null || true
+    ok "nginx stopped"
+  elif pgrep -f "nginx.*$BH_HOME/nginx/nginx.conf" >/dev/null 2>&1; then
+    # pid file stale but a OmniServ nginx is still bound — kill it by config path.
+    warn "stale nginx (pid file out of sync) — terminating by config match"
+    $pre pkill -f "nginx.*$BH_HOME/nginx/nginx.conf" && ok "nginx stopped" || no "could not stop stale nginx"
+  else info "nginx not running"; fi
+  rm -f "$BH_HOME/run/nginx.pid" 2>/dev/null || true
+}
+
+# Is a php pool running? (by its pid file)
+fpm_running(){ local pid="$BH_HOME/run/php-$(php_label "$1").pid"; [ -f "$pid" ] && pid_alive "$(cat "$pid")"; }
+
+# PHP keys referenced by ENABLED site vhosts (php-8.3.sock -> php@8.3, php-default.sock -> php).
+# Used so a site's pool starts even when that version isn't individually starred —
+# otherwise the site 502s (no FPM socket) until the pool is started by hand.
+site_php_keys(){
+  local f s label
+  for f in "$BH_HOME"/nginx/sites/*.conf; do
+    [ -f "$f" ] || continue
+    grep -ho 'php-[0-9.]*\.sock\|php-default\.sock' "$f" 2>/dev/null
+  done | sort -u | while read -r s; do
+    label="${s#php-}"; label="${label%.sock}"
+    [ "$label" = default ] && echo php || echo "php@$label"
+  done
+}
+
+# brew-services managed daemons (db/cache/mail)
+# Bind MariaDB/MySQL to loopback ONLY. Root has no password by default, so the server
+# must never be reachable from the LAN — and brew's default binds all interfaces (0.0.0.0).
+# Idempotent drop-in in my.cnf.d (survives brew upgrades). Applied on every DB start; takes
+# effect on the next (re)start of the server.
+db_secure_bind(){
+  local d="$BREW_PREFIX/etc/my.cnf.d" f
+  [ -d "$d" ] || mkdir -p "$d" 2>/dev/null || return 0
+  f="$d/omniserv.cnf"
+  grep -q '127\.0\.0\.1' "$f" 2>/dev/null && return 0
+  printf '# OmniServ — keep the DB on localhost only (root has no password by default)\n[mysqld]\nbind-address = 127.0.0.1\n' > "$f" 2>/dev/null || true
+}
+
+brew_svc(){ # action key
+  local action="$1" key="$2" formula; formula="$(svc_formula "$key")"
+  svc_installed "$key" || { warn "$key not installed"; return; }
+  case "$action:$key" in start:mariadb|start:mysql) db_secure_bind ;; esac
+  brew services "$action" "$formula" >/dev/null 2>&1 && ok "$key $action" || no "$key $action failed"
+}
+
+# Start every installed + enabled (auto-start) service. Order follows the registry
+# (PHP pools → nginx → apache → DBs), so sockets exist before nginx proxies them.
+start_all(){
+  hdr "Starting enabled services"
+  # ensure the default PHP pool conf exists so a fresh install has something to start
+  [ -n "$(fpm_keys)" ] || render_fpm_pool "$(php_key default)" >/dev/null 2>&1 || true
+  # start every PHP version an enabled site needs (sockets must exist before nginx
+  # proxies them), even if that version isn't starred for auto-start.
+  local pk
+  for pk in $(site_php_keys); do
+    svc_installed "$pk" || continue
+    fpm_running "$pk" && continue
+    ( fpm_start "$pk" ) || warn "$pk failed to start (continuing)"
+  done
+  local IFS='|' key formula probe role
+  while read -r key formula probe role; do
+    [ -n "$key" ] || continue
+    svc_installed "$key" || continue
+    svc_enabled "$key" || continue
+    # Each start runs in a subshell so a failure (e.g. nginx `die` on a bad vhost)
+    # can't abort the whole loop — every other service still gets started.
+    case "$role" in
+      php) ( fpm_start "$key" ) || warn "$key failed to start (continuing)" ;;
+      web) [ "$key" = nginx ] && { ( nginx_start ) || warn "nginx failed to start — check vhost configs (continuing)"; }
+           [ "$key" = httpd ] && { ( apache_start ) || warn "apache failed to start (continuing)"; } ;;
+      db|cache|mail) ( brew_svc start "$key" ) || warn "$key failed to start (continuing)" ;;
+      dns) # dnsmasq needs root for :53 — only doable here when start_all itself runs elevated
+           if ! dnsmasq_running; then
+             if [ "$(id -u)" = 0 ]; then ( cmd_dns ) || warn "dnsmasq failed to start (continuing)"
+             else warn "dnsmasq not running — click Start on dnsmasq (it needs an admin prompt) so *.$(jget tld test) resolves"; fi
+           fi ;;
+    esac
+  done < <(services)
+  # bring Apache up if any site uses it, even when httpd isn't in the enabled set
+  have_apache_sites && apache_start >/dev/null 2>&1 || true
+}
+# Stop everything that's running (web + all PHP pools + DB/cache/mail daemons).
+stop_all(){
+  hdr "Stopping all services"
+  nginx_stop
+  apache_running && apache_stop || true
+  local k; for k in $(fpm_keys); do fpm_stop "$k"; done
+  local IFS='|' key formula probe role
+  while read -r key formula probe role; do
+    [ -n "$key" ] || continue
+    case "$role" in db|cache|mail) svc_installed "$key" && brew_svc stop "$key" >/dev/null 2>&1 || true ;; esac
+  done < <(services)
+  ok "all services stopped"
+}
+
+cmd_start() {
+  need_init
+  local what="${1:-all}"
+  case "$what" in
+    all) start_all ;;
+    nginx) nginx_start ;;
+    apache|httpd) apache_start ;;
+    php|php@*) fpm_start "$(php_key "$what")" ;;
+    php*) fpm_start "$(php_key "${what#php}")" ;;
+    dnsmasq) cmd_dns ;;
+    mariadb|mysql|postgresql@17|redis|memcached|mailpit) brew_svc start "$what" ;;
+    python|fnm) ok "$what is a tool, not a daemon — it's ready once installed" ;;
+    *) die "start: unknown target $what" ;;
+  esac
+}
+cmd_stop() {
+  need_init
+  local what="${1:-all}"
+  case "$what" in
+    all) stop_all ;;
+    nginx) nginx_stop ;;
+    apache|httpd) apache_stop ;;
+    php|php@*) fpm_stop "$(php_key "$what")" ;;
+    php*) fpm_stop "$(php_key "${what#php}")" ;;
+    dnsmasq) dnsmasq_stop ;;
+    mariadb|mysql|postgresql@17|redis|memcached|mailpit) brew_svc stop "$what" ;;
+    python|fnm) ok "$what is a tool, not a daemon — nothing to stop" ;;
+    *) die "stop: unknown target $what" ;;
+  esac
+}
+cmd_restart() {
+  need_init
+  local what="${1:-all}"
+  cmd_stop "$what"
+  # `brew services stop` is async — restarting immediately races and a DB/cache daemon
+  # can report "not started". Let the stop settle before starting again.
+  sleep 2
+  cmd_start "$what"
+}
+
+# ── databases (mysql/mariadb + postgresql) ──────────────────────────────────
+MYSQL_CLI(){ [ -x "$BREW_PREFIX/bin/mysql" ] && echo "$BREW_PREFIX/bin/mysql" || command -v mysql 2>/dev/null || command -v mariadb 2>/dev/null || echo /usr/bin/mysql; }
+PSQL_CLI(){ echo "$BREW_PREFIX/opt/postgresql@17/bin/psql"; }
+PG_BIN(){ echo "$BREW_PREFIX/opt/postgresql@17/bin/$1"; }
+
+db_valid_name(){ [[ "$1" =~ ^[A-Za-z0-9_]+$ ]] || die "invalid db name '$1' (use letters, digits, underscore)"; }
+# Site name = a DNS label — prevents path traversal + nginx-config injection.
+valid_site_name(){ [[ "$1" =~ ^[a-z0-9][a-z0-9.-]*$ ]] || die "invalid site name '$1' (use lowercase letters, digits, hyphens, dots)"; }
+
+# Run the mysql client with auto-detected auth: OS user first (brew MariaDB's
+# unix_socket account), then passwordless -u root (Oracle MySQL / older setups).
+mysql_run(){
+  local c; c="$(MYSQL_CLI)"; [ -x "$c" ] || return 127
+  if "$c" -N -e "SELECT 1;" >/dev/null 2>&1; then "$c" "$@"
+  elif "$c" -u root -N -e "SELECT 1;" >/dev/null 2>&1; then "$c" -u root "$@"
+  elif [ -n "${OMNISERV_OLD_DB_PASSWORD:-}" ] && MYSQL_PWD="$OMNISERV_OLD_DB_PASSWORD" "$c" -u root -N -e "SELECT 1;" >/dev/null 2>&1; then MYSQL_PWD="$OMNISERV_OLD_DB_PASSWORD" "$c" -u root "$@"
+  elif [ -n "${DB_OLD_PASSWORD:-}" ] && MYSQL_PWD="$DB_OLD_PASSWORD" "$c" -u root -N -e "SELECT 1;" >/dev/null 2>&1; then MYSQL_PWD="$DB_OLD_PASSWORD" "$c" -u root "$@"
+  elif [ -n "${DB_PASSWORD:-}" ] && MYSQL_PWD="$DB_PASSWORD" "$c" -u root -N -e "SELECT 1;" >/dev/null 2>&1; then MYSQL_PWD="$DB_PASSWORD" "$c" -u root "$@"
+  elif [ -n "${OMNISERV_DB_PASSWORD:-}" ] && MYSQL_PWD="$OMNISERV_DB_PASSWORD" "$c" -u root -N -e "SELECT 1;" >/dev/null 2>&1; then MYSQL_PWD="$OMNISERV_DB_PASSWORD" "$c" -u root "$@"
+  else return 1; fi
+}
+
+# list user databases for an engine, one per line
+db_names_mysql(){
+  mysql_run -N -e "SHOW DATABASES;" 2>/dev/null \
+    | grep -vE '^(information_schema|performance_schema|mysql|sys)$' || true; }
+db_names_pg(){ local c; c="$(PSQL_CLI)"; [ -x "$c" ] || return 0
+  "$c" -U "$USER_NAME" -d postgres -tAc \
+    "SELECT datname FROM pg_database WHERE datistemplate=false AND datname<>'postgres';" 2>/dev/null || true; }
+
+# The convention: each managed DB optionally has a dedicated user named after the
+# DB at @localhost. "Has a password" == that user exists.
+db_users_mysql(){ mysql_run -N -e "SELECT user FROM mysql.user WHERE host='localhost';" 2>/dev/null || true; }
+
+# Escape a string for a MySQL single-quoted literal.
+mysql_esc(){ local s="$1"; s="${s//\\/\\\\}"; s="${s//\'/\\\'}"; printf '%s' "$s"; }
+# Escape a string for a PostgreSQL single-quoted literal: double the quotes (backslashes are
+# literal under the default standard_conforming_strings=on — MySQL backslash-escaping is wrong for PG).
+pg_esc(){ printf '%s' "${1//\'/\'\'}"; }
+
+# Password comes from --password OR $OMNISERV_DB_PASSWORD (env keeps it out of `ps`).
+DB_PASSWORD=""
+
+cmd_db(){
+  need_init
+  local sub="${1:-list}"; shift || true
+  local engine=mysql json=0 name="" pw_set=0
+  while [ $# -gt 0 ]; do case "$1" in
+    --engine) engine="$2"; shift 2;;
+    --json) json=1; shift;;
+    --password) DB_PASSWORD="$2"; pw_set=1; shift 2;;
+    *) name="$1"; shift;;
+  esac; done
+  [ "$pw_set" = 1 ] || DB_PASSWORD="${OMNISERV_DB_PASSWORD:-}"
+  case "$sub" in
+    list) db_list "$json" ;;
+    create) [ -n "$name" ] || die "usage: omniserv db create <name> [--engine mysql|pg] [--password PW]"; db_create "$engine" "$name" ;;
+    drop)   [ -n "$name" ] || die "usage: omniserv db drop <name> [--engine mysql|pg]"; db_drop "$engine" "$name" ;;
+    passwd) [ -n "$name" ] || die "usage: omniserv db passwd <name> [--engine mysql|pg] --password PW"; db_set_password "$engine" "$name" ;;
+    root-status) db_root_status ;;
+    root-passwd) db_root_passwd ;;
+    *) die "usage: omniserv db {list|create|drop|passwd|root-status|root-passwd} [name] [--engine mysql|pg] [--password PW]" ;;
+  esac
+}
+
+# Whether mysql/mariadb root@localhost has a password set. Prints set|blank|unavailable.
+db_root_status(){
+  local r out cli
+  r="$(mysql_run -N -e "SELECT IF(LENGTH(authentication_string)>0,'set','blank') FROM mysql.user WHERE user='root' AND host='localhost' LIMIT 1;" 2>/dev/null)" || true
+  if [ -n "$r" ]; then
+    printf '%s\n' "$r"
+    return 0
+  fi
+  cli="$(MYSQL_CLI 2>/dev/null || echo mysql)"
+  out="$("$cli" -u root -N -e "SELECT 1;" 2>&1 || true)"
+  if grep -qi "Access denied" <<<"$out"; then
+    echo set
+  else
+    echo unavailable
+  fi
+}
+
+# Set (or, with empty password, clear) the mysql/mariadb root@localhost password.
+# Only touches root — the OS-user socket account we operate through is untouched.
+# The password is never persisted (the GUI re-prompts for the current one); each run gets it
+# via env (OMNISERV_DB_PASSWORD / OMNISERV_OLD_DB_PASSWORD), which keeps it out of `ps`/argv.
+db_root_passwd(){
+  local epw; epw="$(mysql_esc "$DB_PASSWORD")"
+  local sql="ALTER USER 'root'@'localhost' IDENTIFIED BY '$epw'; FLUSH PRIVILEGES;"
+  if mysql_run -e "$sql" 2>/dev/null; then
+    ok "root password $([ -n "$DB_PASSWORD" ] && echo set || echo "cleared (blank)")"
+    return 0
+  fi
+  # Fallback 1: Privileged execution via pkexec/sudo if unprivileged connect failed.
+  # The SQL goes on STDIN, not `-e` argv: the mysql client scrubs `-p<PW>` but not `-e`,
+  # and pkexec/sudo record the full command vector in their audit logs permanently.
+  # `${SUDO-sudo}` also keeps the set -u engine from aborting on macOS, where $SUDO is never
+  # assigned (this shared code runs before the Linux platform layer is sourced). `-` (not `:-`)
+  # preserves the Linux convention where platform-linux.sh sets SUDO="" = already root, no
+  # elevation — so we don't re-escalate an already-root run through sudo.
+  local cli; cli="$(MYSQL_CLI 2>/dev/null || echo mysql)"
+  if [ -x "$cli" ]; then
+    if [ "$(id -u)" != 0 ] && command -v pkexec >/dev/null 2>&1 && [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+      if printf '%s\n' "$sql" | pkexec "$cli" 2>/dev/null; then
+        ok "root password $([ -n "$DB_PASSWORD" ] && echo set || echo "cleared (blank)")"
+        return 0
+      fi
+    elif [ "$(id -u)" = 0 ] || command -v sudo >/dev/null 2>&1; then
+      if printf '%s\n' "$sql" | ${SUDO-sudo} "$cli" 2>/dev/null; then
+        ok "root password $([ -n "$DB_PASSWORD" ] && echo set || echo "cleared (blank)")"
+        return 0
+      fi
+    fi
+  fi
+  # Fallback 2: Legacy MariaDB/MySQL SQL syntax
+  for alt_sql in \
+    "ALTER USER 'root'@'localhost' IDENTIFIED VIA mysql_native_password USING '$epw'; FLUSH PRIVILEGES;" \
+    "SET PASSWORD FOR 'root'@'localhost' = PASSWORD('$epw'); FLUSH PRIVILEGES;"; do
+    if mysql_run -e "$alt_sql" 2>/dev/null; then
+      ok "root password $([ -n "$DB_PASSWORD" ] && echo set || echo "cleared (blank)")"
+      return 0
+    fi
+  done
+  die "failed (server running? do you have privilege?)"
+}
+
+db_list(){
+  local json="$1"
+  if [ "$json" = 1 ]; then
+    local out="" first=1 d users=""
+    users="$(db_users_mysql)"
+    while read -r d; do [ -z "$d" ] && continue
+      local has=false
+      printf '%s\n' "$users" | grep -qx "$d" && has=true
+      local row; row="$(printf '{"name":"%s","engine":"mysql","hasUser":%s,"user":"%s"}' \
+        "$(json_esc "$d")" "$has" "$(json_esc "$d")")"
+      [ "$first" = 1 ] && { out="$row"; first=0; } || out="$out,$row"
+    done < <(db_names_mysql)
+    while read -r d; do [ -z "$d" ] && continue
+      local row; row="$(printf '{"name":"%s","engine":"pg","hasUser":false,"user":""}' "$(json_esc "$d")")"
+      [ "$first" = 1 ] && { out="$row"; first=0; } || out="$out,$row"
+    done < <(db_names_pg)
+    printf '[%s]\n' "$out"
+    return
+  fi
+  hdr "MySQL/MariaDB databases"; db_names_mysql | while read -r d; do ok "$d"; done
+  hdr "PostgreSQL databases";   db_names_pg    | while read -r d; do ok "$d"; done
+}
+
+# Create user <name>@localhost with the current DB_PASSWORD and grant it the db.
+mysql_grant_user(){
+  local name="$1" epw; epw="$(mysql_esc "$DB_PASSWORD")"
+  mysql_run -e "CREATE USER IF NOT EXISTS '$(mysql_esc "$name")'@'localhost' IDENTIFIED BY '$epw';
+                ALTER USER '$(mysql_esc "$name")'@'localhost' IDENTIFIED BY '$epw';
+                GRANT ALL PRIVILEGES ON \`$name\`.* TO '$(mysql_esc "$name")'@'localhost';
+                FLUSH PRIVILEGES;"
+}
+
+db_create(){
+  local engine="$1" name="$2"; db_valid_name "$name"
+  case "$engine" in
+    mysql|mariadb)
+      mysql_run -e "CREATE DATABASE IF NOT EXISTS \`$name\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" \
+        || die "create failed (is the server running?)"
+      ok "created mysql db '$name'"
+      if [ -n "$DB_PASSWORD" ]; then
+        mysql_grant_user "$name" && ok "user '$name'@localhost created with password" || die "user/grant failed"
+      fi ;;
+    pg|postgres) local c; c="$(PG_BIN createdb)"; [ -x "$c" ] || die "postgresql not installed"
+      "$c" -U "$USER_NAME" "$name" || die "create failed (is the server running?)"
+      ok "created postgres db '$name'"
+      if [ -n "$DB_PASSWORD" ]; then
+        "$(PSQL_CLI)" -U "$USER_NAME" -d postgres -c \
+          "DO \$\$ BEGIN CREATE ROLE \"$name\" LOGIN PASSWORD '$(pg_esc "$DB_PASSWORD")'; EXCEPTION WHEN duplicate_object THEN ALTER ROLE \"$name\" PASSWORD '$(pg_esc "$DB_PASSWORD")'; END \$\$; GRANT ALL PRIVILEGES ON DATABASE \"$name\" TO \"$name\";" \
+          && ok "role '$name' created with password" || warn "role/grant failed"
+      fi ;;
+    *) die "unknown engine: $engine (mysql|pg)" ;;
+  esac
+}
+
+# Set or change the password for a db's user (creates the user+grant if missing).
+db_set_password(){
+  local engine="$1" name="$2"; db_valid_name "$name"
+  [ -n "$DB_PASSWORD" ] || die "no password given (--password or \$OMNISERV_DB_PASSWORD)"
+  case "$engine" in
+    mysql|mariadb)
+      mysql_grant_user "$name" && ok "password set for '$name'@localhost" || die "set password failed (is the server running?)" ;;
+    pg|postgres) local c; c="$(PSQL_CLI)"; [ -x "$c" ] || die "postgresql not installed"
+      "$c" -U "$USER_NAME" -d postgres -c \
+        "DO \$\$ BEGIN CREATE ROLE \"$name\" LOGIN PASSWORD '$(pg_esc "$DB_PASSWORD")'; EXCEPTION WHEN duplicate_object THEN ALTER ROLE \"$name\" PASSWORD '$(pg_esc "$DB_PASSWORD")'; END \$\$; GRANT ALL PRIVILEGES ON DATABASE \"$name\" TO \"$name\";" \
+        && ok "password set for role '$name'" || die "set password failed" ;;
+    *) die "unknown engine: $engine (mysql|pg)" ;;
+  esac
+}
+
+db_drop(){
+  local engine="$1" name="$2"; db_valid_name "$name"
+  case "$engine" in
+    mysql|mariadb)
+      mysql_run -e "DROP DATABASE IF EXISTS \`$name\`; DROP USER IF EXISTS '$(mysql_esc "$name")'@'localhost';" \
+        && ok "dropped mysql db '$name' (and its user, if any)" || die "drop failed (is the server running?)" ;;
+    pg|postgres) local c; c="$(PG_BIN dropdb)"; [ -x "$c" ] || die "postgresql not installed"
+      "$c" -U "$USER_NAME" "$name" && ok "dropped postgres db '$name'" || die "drop failed (is the server running?)" ;;
+    *) die "unknown engine: $engine (mysql|pg)" ;;
+  esac
+}
+
+# ── privileged helper (password-less nginx control + autostart) ──────────────
+# A sudoers rule so the GUI/CLI can start/stop/reload nginx (binds :80/:443)
+# without a password prompt — the standard local-dev approach (à la Valet).
+SUDOERS_FILE="/etc/sudoers.d/omniserv"
+helper_installed(){ [ -f "$SUDOERS_FILE" ]; }
+helper_target_user(){ echo "${SUDO_USER:-$(stat -f%Su /dev/console 2>/dev/null)}"; }
+
+cmd_helper(){
+  need_init
+  case "${1:-status}" in
+    install)   helper_install ;;
+    uninstall) helper_uninstall ;;
+    status)    helper_installed && ok "privileged helper: installed" || info "privileged helper: not installed" ;;
+    *) die "usage: omniserv helper {install|uninstall|status}" ;;
+  esac
+}
+
+helper_install(){
+  [ "$(id -u)" = 0 ] || die "needs root: sudo omniserv helper install   (or use the GUI button)"
+  local u nginx tmp; u="$(helper_target_user)"; nginx="$BREW_PREFIX/bin/nginx"
+  [ -n "$u" ] || die "could not determine the login user"
+  tmp="$(mktemp)"
+  cat > "$tmp" <<SUDO
+# OmniServ — let $u control nginx (binds :80/:443) without a password.
+# Remove with: sudo omniserv helper uninstall
+Defaults:$u !requiretty
+$u ALL=(root) NOPASSWD: $nginx
+SUDO
+  /usr/sbin/visudo -cf "$tmp" >/dev/null 2>&1 || { rm -f "$tmp"; die "sudoers validation failed — not installed"; }
+  install -m 0440 -o root -g wheel "$tmp" "$SUDOERS_FILE"; rm -f "$tmp"
+  ok "privileged helper installed — nginx start/stop/reload no longer needs a password"
+  info "with this + 'Launch at login' + autostart, OmniServ comes up after reboot with no prompt"
+}
+
+helper_uninstall(){
+  [ "$(id -u)" = 0 ] || die "needs root: sudo omniserv helper uninstall"
+  rm -f "$SUDOERS_FILE" && ok "privileged helper removed" || die "remove failed"
+}
+
+# ── config (editable settings) ───────────────────────────────────────────────
+cmd_config(){
+  need_init
+  local sub="${1:-show}"; shift || true
+  case "$sub" in
+    show) config_dump ;;
+    set)  config_set "$@" ;;
+    *) die "usage: omniserv config {show|set <key> <value>}" ;;
+  esac
+}
+
+# Print the config, redacting any legacy `root_password` key a pre-1.0.53 build may have
+# persisted in plaintext (this build never writes it; the GUI re-prompts instead). Strip the
+# whole line so the secret never reaches the 4s API poll / status, and drop the trailing comma
+# a legacy build left when root_password was the last key (otherwise the JSON would be invalid
+# and cmd_api's inlined snapshot would blank the dashboard).
+config_dump(){
+  sed '/"root_password"[[:space:]]*:/d' "$BH_HOME/config/omniserv.json" 2>/dev/null \
+    | sed 'N;s/,\n}/}/;P;D' \
+    || cat "$BH_HOME/config/omniserv.json"
+}
+
+# Rewrite omniserv.json from current values, overriding one key.
+json_set(){
+  local k="$1" v="$2"
+  local tld httpp httpsp dphp dweb bp sroot autostart
+  tld="$(jget tld test)"; httpp="$(jget http_port 80)"; httpsp="$(jget https_port 443)"
+  dphp="$(jget default_php 8.4)"; dweb="$(jget default_web nginx)"
+  bp="$(jget brew_prefix "$BREW_PREFIX")"; sroot="$(jget sites_root "$HOME/OmniServ/www")"
+  autostart="$(jget autostart false)"
+  case "$k" in
+    tld) tld="$v";; http_port) httpp="$v";; https_port) httpsp="$v";;
+    default_php) dphp="$v";; default_web) dweb="$v";; sites_root) sroot="$v";; autostart) autostart="$v";;
+  esac
+  cat > "$BH_HOME/config/omniserv.json" <<JSON
+{
+  "tld": "$tld",
+  "http_port": $httpp,
+  "https_port": $httpsp,
+  "default_php": "$dphp",
+  "default_web": "$dweb",
+  "brew_prefix": "$bp",
+  "sites_root": "$sroot",
+  "autostart": $autostart
+}
+JSON
+}
+
+# Re-render every site vhost (e.g. after a TLD/port change).
+regen_all_vhosts(){
+  shopt -s nullglob
+  local tld; tld="$(jget tld test)"
+  local f n root php server port
+  for f in "$BH_HOME"/nginx/sites/*.conf; do
+    n="$(basename "$f" .conf)"
+    # Proxy/tool sites (e.g. mailpit) have a proxy_pass and NO root — re-render them
+    # as a proxy, never as a normal site (that produced a broken `root ;` directive).
+    port="$(sed -n 's#.*proxy_pass http://127.0.0.1:\([0-9][0-9]*\).*#\1#p' "$f" | head -1)"
+    if [ -n "$port" ]; then render_nginx_proxy_site "$n" "$n.$tld" "$port"; continue; fi
+    root="$(vhost_root_read "$f")"
+    [ -n "$root" ] || continue   # no root + no proxy → can't safely re-render, leave as-is
+    php="$(sed -n 's/.*php=\([^[:space:]]*\).*/\1/p' "$f" | head -1)"
+    server="$(vhost_server "$f")"
+    render_site_vhost "$n" "$n.$tld" "$root" "$php" "$server"
+  done
+  apache_reload
+}
+
+config_set(){
+  [ $# -ge 2 ] || die "usage: omniserv config set <key> <value>"
+  local key="$1" val="$2"
+  case "$key" in
+    http_port|https_port) [[ "$val" =~ ^[0-9]+$ ]] || die "$key must be numeric" ;;
+    tld) [[ "$val" =~ ^[a-z][a-z0-9-]*$ ]] || die "tld must be lowercase letters/digits/hyphen" ;;
+    sites_root) [ -n "$val" ] || die "sites_root cannot be empty" ;;
+    default_php) val="$(php_key "$val")" ;;
+    default_web) [[ "$val" =~ ^(nginx|apache)$ ]] || die "default_web must be nginx|apache" ;;
+    autostart) [[ "$val" =~ ^(true|false)$ ]] || die "autostart must be true|false" ;;
+    *) die "unknown/uneditable key: $key" ;;
+  esac
+  json_set "$key" "$val"
+  ok "set $key = $val"
+  case "$key" in
+    http_port|https_port|tld)
+      regen_all_vhosts
+      render_nginx_main "$(jget http_port 80)"
+      warn "restart nginx to apply (omniserv restart nginx)"
+      [ "$key" = tld ] && warn "TLD changed — HTTPS certs are per-domain; re-run 'omniserv secure <name>.$val' per site" ;;
+  esac
+}
+
+# ── logs ─────────────────────────────────────────────────────────────────────
+cmd_logs(){
+  need_init
+  if [ "${1:-}" = "--list" ]; then
+    local out="" first=1 f b
+    shopt -s nullglob
+    for f in "$BH_HOME"/logs/*.log; do
+      b="$(basename "$f")"
+      [ "$first" = 1 ] && { out="\"$b\""; first=0; } || out="$out,\"$b\""
+    done
+    printf '[%s]\n' "$out"; return
+  fi
+  local name="${1:-nginx-error.log}" n="${2:-200}"
+  case "$name" in */*|*..*) die "invalid log name" ;; esac
+  local f="$BH_HOME/logs/$name"
+  [ -f "$f" ] || { echo "(no log yet: $name)"; return; }
+  tail -n "$n" "$f"
+}
+
+# ── node (multi-version via fnm; versions live under ~/.omniserv/fnm) ─────────
+FNM_BIN(){ echo "$BREW_PREFIX/bin/fnm"; }
+fnm_run(){
+  local f; f="$(FNM_BIN)"; [ -x "$f" ] || die "fnm not installed — omniserv install fnm"
+  export FNM_DIR="$BH_HOME/fnm"; mkdir -p "$FNM_DIR"
+  "$f" --fnm-dir "$FNM_DIR" "$@"
+}
+
+cmd_node(){
+  need_init
+  local sub="${1:-list}"; shift || true
+  case "$sub" in
+    list)  node_list "${1:-}" ;;
+    remote) fnm_run list-remote --lts 2>/dev/null | tail -40 ;;
+    install|i)  [ -n "${1:-}" ] || die "usage: omniserv node install <version>"
+                hdr "Installing Node $1"; fnm_run install "$1" && ok "node $1 installed" || die "install failed" ;;
+    use|default) [ -n "${1:-}" ] || die "usage: omniserv node use <version>"; node_use "$1" ;;
+    uninstall|rm|uni) [ -n "${1:-}" ] || die "usage: omniserv node uninstall <version>"
+                fnm_run uninstall "$1" && ok "node $1 uninstalled" || die "uninstall failed" ;;
+    *) die "usage: omniserv node {list|remote|install|use|uninstall} [version]" ;;
+  esac
+}
+
+node_list(){
+  local json="$1" out; out="$(fnm_run list 2>/dev/null || true)"
+  if [ "$json" = "--json" ]; then
+    local arr="" first=1 line v def
+    while IFS= read -r line; do
+      [ -z "$line" ] && continue
+      v="$(printf '%s' "$line" | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+      [ -z "$v" ] && continue
+      def=false; printf '%s' "$line" | grep -q 'default' && def=true
+      local row; row="$(printf '{"version":"%s","default":%s}' "$v" "$def")"
+      [ "$first" = 1 ] && { arr="$row"; first=0; } || arr="$arr,$row"
+    done <<< "$out"
+    printf '[%s]\n' "$arr"
+    return
+  fi
+  hdr "Installed Node versions"; printf '%s\n' "$out"
+}
+
+# Set the default node + link node/npm/npx into ~/.omniserv/bin for PATH use.
+node_use(){
+  local ver="$1" path bindir b
+  fnm_run default "$ver" || die "set default failed (is $ver installed?)"
+  path="$(fnm_run exec --using="$ver" -- node -e 'console.log(process.execPath)' 2>/dev/null | tail -1)"
+  [ -n "$path" ] || die "could not resolve node $ver"
+  bindir="$(dirname "$path")"
+  mkdir -p "$BH_HOME/bin"
+  for b in node npm npx corepack; do [ -e "$bindir/$b" ] && ln -sf "$bindir/$b" "$BH_HOME/bin/$b"; done
+  ok "default node = $ver"
+  info "linked node/npm/npx into $BH_HOME/bin — add to PATH: export PATH=\"$BH_HOME/bin:\$PATH\""
+}
+
+# ── php (ionCube loader + per-version config) ────────────────────────────────
+# Current macOS loader bundles. The old `_dar_` bundles only shipped 7.4 + 8.1; the `_mac_`
+# bundles add arm64 loaders for 8.2–8.5 (filenames are ioncube_loader_mac_<ver>.so).
+IONCUBE_URL_ARM="https://downloads.ioncube.com/loader_downloads/ioncube_loaders_mac_arm64.zip"
+IONCUBE_URL_X64="https://downloads.ioncube.com/loader_downloads/ioncube_loaders_mac_x86-64.zip"
+
+cmd_php(){
+  need_init
+  local sub="${1:-status}"; shift || true
+  case "$sub" in
+    ioncube) php_ioncube "$@" ;;
+    status)  php_status ;;
+    ini)     php_ini "$@" ;;
+    *) die "usage: omniserv php {ioncube [version|all]|status|ini {path|reload} <ver>}" ;;
+  esac
+}
+
+# php-cli binary for a php key (sibling of the fpm binary).
+php_cli_bin(){ local b; b="$(php_fpm_bin "$1")"; echo "${b%/sbin/php-fpm}/bin/php"; }
+
+# Resolve the loaded php.ini for a php key, creating one if the version has none
+# (Homebrew leaves some kegs without an etc/php/<mm>/php.ini). Prints the path.
+php_ini_path(){
+  local key="$1" b ini dir
+  b="$(php_cli_bin "$key")"; [ -x "$b" ] || b="$BREW_PREFIX/bin/php"
+  [ -x "$b" ] || die "$key not installed"
+  ini="$("$b" -r 'echo php_ini_loaded_file() ?: "";' 2>/dev/null)"
+  if [ -z "$ini" ]; then
+    dir="$("$b" -r 'echo PHP_CONFIG_FILE_PATH;' 2>/dev/null)"
+    [ -n "$dir" ] || dir="$BREW_PREFIX/etc/php/$(php_mm "$key")"
+    mkdir -p "$dir"; ini="$dir/php.ini"
+    # Seed from a dist template, else a sibling version's php.ini, else a stub.
+    local src=""
+    for t in "$dir/php.ini-development" "$dir/php.ini-production"; do [ -f "$t" ] && { src="$t"; break; }; done
+    if [ -z "$src" ]; then
+      local IFS='|' k _f _p _r sb
+      while read -r k _f _p _r; do
+        [ "$_r" = php ] || continue; [ "$k" = "$key" ] && continue
+        svc_installed "$k" || continue
+        sb="$(php_cli_bin "$k")"; [ -x "$sb" ] || continue
+        local cand; cand="$("$sb" -r 'echo php_ini_loaded_file() ?: "";' 2>/dev/null)"
+        [ -n "$cand" ] && [ -f "$cand" ] && { src="$cand"; break; }
+      done < <(services)
+    fi
+    if [ -n "$src" ]; then cp "$src" "$ini"
+    else printf '; OmniServ-created php.ini for %s\n; Add your directives below.\n' "$key" > "$ini"; fi
+  fi
+  printf '%s\n' "$ini"
+}
+
+# Restart a php version's FPM (only if running) so edited php.ini takes effect.
+php_ini_reload(){
+  local key="$1"
+  if fpm_running "$key"; then
+    fpm_stop "$key" >/dev/null 2>&1 || true
+    fpm_start "$key" >/dev/null 2>&1 && ok "php-fpm $key reloaded" || warn "$key reload failed"
+  else
+    info "$key not running — changes apply on next start"
+  fi
+}
+
+php_ini(){
+  local act="${1:-path}"; shift || true
+  local key; key="$(php_key "${1:-}")"
+  svc_exists "$key" || die "unknown php version: ${1:-}"
+  svc_installed "$key" || die "$key not installed"
+  case "$act" in
+    path)   php_ini_path "$key" ;;
+    reload) php_ini_reload "$key" ;;
+    *) die "usage: omniserv php ini {path|reload} <ver>" ;;
+  esac
+}
+
+# Major.minor of a php key's binary (e.g. 8.4), used for the loader filename.
+php_mm(){
+  local key="$1" b; b="$(php_fpm_bin "$key")"; b="${b%/sbin/php-fpm}/bin/php"
+  [ -x "$b" ] || b="$BREW_PREFIX/bin/php"
+  # -d display_errors=0/error_reporting=0 so a version's startup deprecations (e.g. 8.5's
+  # session.sid_* printed to STDOUT) don't pollute the value; grep pins it to the X.Y number.
+  "$b" -d error_reporting=0 -d display_errors=0 -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1 || true
+}
+
+# Pick the ionCube macOS bundle matching the PHP binaries' architecture — the loader is a Mach-O
+# of the same arch as PHP, so detect from an ACTUAL installed php binary (`file`), which is robust
+# even if the engine happens to run under Rosetta or a non-standard Homebrew. Falls back to the
+# machine arch when no php is installed yet. Apple Silicon → mac_arm64 (7.4, 8.1–8.5);
+# Intel → mac_x86-64 (…8.3).
+_ioncube_url(){
+  local probe role arch=""
+  while IFS='|' read -r _ _ probe role; do
+    [ "$role" = php ] && [ -x "$BREW_PREFIX/$probe" ] && { arch="$(file -b "$BREW_PREFIX/$probe" 2>/dev/null)"; break; }
+  done < <(services)
+  case "$arch" in
+    *arm64*)  echo "$IONCUBE_URL_ARM" ;;
+    *x86_64*) echo "$IONCUBE_URL_X64" ;;
+    *) [ "$(uname -m)" = x86_64 ] && echo "$IONCUBE_URL_X64" || echo "$IONCUBE_URL_ARM" ;;
+  esac
+}
+
+php_ioncube(){
+  local target="${1:-all}"
+  local dir="$BH_HOME/ioncube"
+  # Download + extract the loader bundle. The `.bundle-mac` marker forces a one-time
+  # re-download for installs that cached the OLD `_dar_` bundle (7.4/8.1 only) so they
+  # pick up the current `_mac_` bundle (adds 8.2–8.5 on Apple Silicon).
+  if [ ! -f "$dir/.bundle-mac" ] || [ ! -f "$dir/ioncube/ioncube_loader_mac_8.1.so" ]; then
+    rm -rf "$dir"; mkdir -p "$dir"
+    local url; url="$(_ioncube_url)"
+    hdr "Downloading ionCube loaders ($(case "$url" in *arm64*) echo "Apple Silicon";; *) echo "Intel";; esac))"
+    curl -fsSL "$url" -o "$dir/loaders.zip" || die "download failed ($url)"
+    ( cd "$dir" && unzip -oq loaders.zip ) || die "unzip failed"
+    : > "$dir/.bundle-mac"
+    ok "loaders in $dir/ioncube"
+  fi
+  # configure each installed php (or one)
+  local IFS='|' key formula probe role
+  while read -r key formula probe role; do
+    [ "$role" = php ] || continue
+    svc_installed "$key" || continue
+    [ "$target" = all ] || [ "$target" = "$key" ] || [ "$target" = "$(php_label "$key")" ] || continue
+    local mm so cd_dir; mm="$(php_mm "$key")"
+    so="$dir/ioncube/ioncube_loader_mac_$mm.so"
+    if [ ! -f "$so" ]; then
+      # List the versions actually present in THIS bundle (arm has more than Intel; both grow
+      # over time) so the guidance is correct per-Mac instead of a hardcoded range.
+      local avail; avail="$(ls "$dir"/ioncube/ioncube_loader_mac_*.so 2>/dev/null | grep -v '_ts' | sed 's#.*/ioncube_loader_mac_##; s/\.so$//' | sort -V | tr '\n' ' ')"
+      warn "$key: ionCube has no macOS loader for PHP $mm on this Mac (available: ${avail:-none}). For ionCube-encoded apps (Blesta/WHMCS), set the site to one of those versions."
+      continue
+    fi
+    cd_dir="$BH_HOME/php/conf.d/$(php_label "$key")"; mkdir -p "$cd_dir" 2>/dev/null || true
+    # Non-fatal per version: a root-owned conf.d dir (from an earlier privileged run) must not
+    # abort the whole loop (set -e) and leave the other versions unconfigured.
+    if printf 'zend_extension=%s\n' "$so" > "$cd_dir/00-ioncube.ini" 2>/dev/null; then
+      ok "ionCube configured for $key (PHP $mm)"
+    else
+      warn "$key: can't write $cd_dir/00-ioncube.ini — a root-owned dir. Fix with: sudo chown -R \"\$(id -un)\" ~/.omniserv"
+    fi
+  done < <(services)
+  info "restart PHP-FPM to load it: omniserv restart all  (verify: omniserv php status)"
+}
+
+php_status(){
+  local IFS='|' key formula probe role
+  hdr "PHP versions"
+  while read -r key formula probe role; do
+    [ "$role" = php ] || continue
+    svc_installed "$key" || continue
+    local b="${BREW_PREFIX}/${probe}" ic="no" cd_dir
+    cd_dir="$BH_HOME/php/conf.d/$(php_label "$key")"
+    [ -f "$cd_dir/00-ioncube.ini" ] && ic="yes"
+    if PHP_INI_SCAN_DIR="$cd_dir:" "$b" -v 2>/dev/null | grep -qi ioncube; then ic="loaded"; fi
+    ok "$(printf '%-10s' "$key") PHP $(php_mm "$key")   ionCube: $ic"
+  done < <(services)
+}
+
+# ── phpMyAdmin ───────────────────────────────────────────────────────────────
+PMA_VER="5.2.3"
+
+# Platform default DB socket when the server is down (can't be queried) and no socket file
+# exists yet. macOS/brew = /tmp/mysql.sock; Linux overrides this to the distro path.
+db_default_socket(){ echo /tmp/mysql.sock; }
+
+# The Unix socket MariaDB/MySQL actually listens on. Prefer the live value (SHOW VARIABLES),
+# else the first existing socket file, else the platform default. Used to (a) point phpMyAdmin
+# at the DB and (b) PIN mysqli/pdo_mysql/mysql default_socket in every FPM pool — otherwise a
+# portable static PHP (whose compiled default socket is /tmp/mysql.sock or empty) can't reach a
+# distro MariaDB on /run/mysqld/mysqld.sock, so `DB_HOST=localhost` sites (WordPress!) fail with
+# "Error establishing a database connection" even though phpMyAdmin (explicit socket) works.
+db_socket(){
+  local s; s="$(mysql_run -N -e "SHOW VARIABLES LIKE 'socket';" 2>/dev/null | awk '{print $2}')"
+  [ -n "$s" ] && { echo "$s"; return; }
+  local c
+  for c in /run/mysqld/mysqld.sock /var/run/mysqld/mysqld.sock /tmp/mysql.sock \
+           "$BREW_PREFIX/var/run/mariadb.sock" /tmp/mariadb.sock; do
+    [ -S "$c" ] && { echo "$c"; return; }
+  done
+  db_default_socket
+}
+pma_socket(){ db_socket; }   # back-compat alias
+
+cmd_pma(){
+  need_init
+  local sub="${1:-install}"; shift || true
+  case "$sub" in
+    install) pma_install ;;
+    *) die "usage: omniserv pma install" ;;
+  esac
+}
+
+pma_install(){
+  local apps="$BH_HOME/apps" dir="$BH_HOME/apps/phpmyadmin"
+  mkdir -p "$apps"
+  if [ ! -f "$dir/index.php" ]; then
+    hdr "Downloading phpMyAdmin $PMA_VER"
+    curl -fsSL "https://files.phpmyadmin.net/phpMyAdmin/$PMA_VER/phpMyAdmin-$PMA_VER-all-languages.zip" -o "$apps/pma.zip" || die "download failed"
+    ( cd "$apps" && unzip -oq pma.zip && rm -rf phpmyadmin && mv "phpMyAdmin-$PMA_VER-all-languages" phpmyadmin && rm -f pma.zip ) || die "extract failed"
+    ok "phpMyAdmin in $dir"
+  else
+    ok "phpMyAdmin already present ($dir)"
+  fi
+  mkdir -p "$dir/tmp"
+  local secret sock; secret="$(openssl rand -hex 16)"; sock="$(pma_socket)"
+  cat > "$dir/config.inc.php" <<PHP
+<?php
+// Generated by OmniServ. Logs in over the MariaDB socket; the FPM pool runs as
+// the OS user, so its passwordless socket account works (AllowNoPassword).
+\$cfg['blowfish_secret'] = '$secret';
+\$i = 0; \$i++;
+\$cfg['Servers'][\$i]['auth_type']      = 'cookie';
+\$cfg['Servers'][\$i]['host']           = 'localhost';
+\$cfg['Servers'][\$i]['socket']         = '$sock';
+\$cfg['Servers'][\$i]['compress']       = false;
+\$cfg['Servers'][\$i]['AllowNoPassword'] = true;
+\$cfg['TempDir'] = '$dir/tmp';
+PHP
+  ok "wrote config.inc.php (socket: $sock)"
+  local tld phpkey; tld="$(jget tld test)"
+  phpkey="$(db_ext_ensure default)"   # phpMyAdmin needs mysqli — pick/heal a PHP that has it
+  render_fpm_pool "$phpkey" >/dev/null 2>&1 || true
+  fpm_start "$phpkey" >/dev/null 2>&1 || true   # ensure the pool is up (no 502)
+  render_site_vhost "phpmyadmin" "phpmyadmin.$tld" "$dir" "$phpkey"
+  tool_autosecure "phpmyadmin.$tld"
+  hdr "phpMyAdmin ready"
+  info "URL  : https://phpmyadmin.$tld"
+  info "login: your DB user (e.g. '$USER_NAME' with a blank password, or 'root' if you set one)"
+  info "uploads allowed up to 2GB"
+  maybe_reload_nginx
+}
+
+# ── Adminer (single-file DB admin) ───────────────────────────────────────────
+cmd_adminer(){ need_init; case "${1:-install}" in install) adminer_install ;; *) die "usage: omniserv adminer install" ;; esac; }
+adminer_install(){
+  local dir="$BH_HOME/apps/adminer"; mkdir -p "$dir"
+  if [ ! -f "$dir/index.php" ]; then
+    hdr "Downloading Adminer"
+    curl -fsSL "https://www.adminer.org/latest.php" -o "$dir/index.php" || die "download failed"
+    ok "Adminer in $dir"
+  else ok "Adminer already present ($dir)"; fi
+  local tld phpkey; tld="$(jget tld test)"
+  phpkey="$(db_ext_ensure default)"   # serve Adminer with a PHP that has mysqli
+  render_fpm_pool "$phpkey" >/dev/null 2>&1 || true
+  fpm_start "$phpkey" >/dev/null 2>&1 || true   # ensure the pool is up (no 502)
+  render_site_vhost adminer "adminer.$tld" "$dir" "$phpkey" nginx
+  tool_autosecure "adminer.$tld"
+  hdr "Adminer ready"
+  info "URL  : https://adminer.$tld"
+  info "login: System=MySQL, Server=localhost, Username=$USER_NAME (blank pass) or root"
+  maybe_reload_nginx
+}
+
+# ── Mailpit (mail catcher: SMTP :1025, web UI :8025) ─────────────────────────
+# ── Cloudflare quick tunnels (share a local site publicly, no account) ───────
+cloudflared_bin(){ echo "$BREW_PREFIX/bin/cloudflared"; }
+cloudflared_installed(){ [ -x "$(cloudflared_bin)" ]; }
+tunnel_pidf(){ echo "$BH_HOME/run/tunnel-$1.pid"; }
+tunnel_logf(){ echo "$BH_HOME/run/tunnel-$1.log"; }
+tunnel_urlf(){ echo "$BH_HOME/run/tunnel-$1.url"; }
+tunnel_running(){ pid_alive "$(cat "$(tunnel_pidf "$1")" 2>/dev/null)"; }
+tunnel_url(){ cat "$(tunnel_urlf "$1")" 2>/dev/null || true; }
+
+# Install cloudflared. Default = Homebrew (macOS); Linux overrides with a direct binary download.
+cloudflared_install(){ hdr "Installing cloudflared"; brew install cloudflared && ok "cloudflared installed"; }
+
+tunnel_start(){
+  local name="$1"; valid_site_name "$name"
+  # First share auto-installs cloudflared (no separate step needed), matching the GUI's one-click flow.
+  cloudflared_installed || cloudflared_install || die "cloudflared install failed"
+  cloudflared_installed || die "cloudflared not installed"
+  local conf="$BH_HOME/nginx/sites/$name.conf"
+  [ -f "$conf" ] || die "no site '$name'"
+  nginx_running || die "nginx not running — start it first"
+  if tunnel_running "$name"; then ok "tunnel already running"; local u; u="$(tunnel_url "$name")"; [ -n "$u" ] && info "public URL: $u"; return; fi
+  local tld domain origin; tld="$(jget tld test)"; domain="$name.$tld"
+  if grep -q 'listen 127.0.0.1:443 ssl' "$conf"; then origin="https://127.0.0.1:443"; else origin="http://127.0.0.1:80"; fi
+  local pidf logf urlf; pidf="$(tunnel_pidf "$name")"; logf="$(tunnel_logf "$name")"; urlf="$(tunnel_urlf "$name")"
+  : > "$logf"; rm -f "$urlf"
+  local args=(tunnel --no-autoupdate --url "$origin" --http-host-header "$domain")
+  [ "${origin%%:*}" = https ] && args+=(--no-tls-verify)
+  nohup "$(cloudflared_bin)" "${args[@]}" >"$logf" 2>&1 &
+  echo $! > "$pidf"
+  hdr "Cloudflare tunnel → $domain"
+  local i url=""
+  for i in $(seq 1 30); do
+    url="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$logf" 2>/dev/null | head -1)" || true
+    [ -n "$url" ] && break
+    tunnel_running "$name" || { no "tunnel exited early — see $logf"; return 1; }
+    sleep 1
+  done
+  if [ -n "$url" ]; then printf '%s' "$url" > "$urlf"; ok "public URL: $url"; info "origin: $origin (Host: $domain)"
+  else warn "tunnel up but no URL yet — check $logf"; fi
+}
+
+tunnel_stop(){
+  local name="$1"; valid_site_name "$name"
+  local p; p="$(cat "$(tunnel_pidf "$name")" 2>/dev/null)"
+  if pid_alive "$p"; then kill "$p" 2>/dev/null || true; ok "tunnel stopped ($name)"; else warn "no tunnel running for $name"; fi
+  rm -f "$(tunnel_pidf "$name")" "$(tunnel_urlf "$name")"
+}
+
+tunnel_list(){
+  shopt -s nullglob
+  local f name
+  for f in "$BH_HOME"/run/tunnel-*.pid; do
+    name="$(basename "$f" .pid)"; name="${name#tunnel-}"
+    tunnel_running "$name" && printf '  %-16s %s\n' "$name" "$(tunnel_url "$name")"
+  done
+}
+
+cmd_tunnel(){
+  need_init
+  local sub="${1:-list}"; shift || true
+  case "$sub" in
+    install) cloudflared_installed && ok "cloudflared already installed" || cloudflared_install || die "install failed" ;;
+    start)   [ -n "${1:-}" ] || die "usage: omniserv tunnel start <name>"; tunnel_start "$1" ;;
+    stop)    [ -n "${1:-}" ] || die "usage: omniserv tunnel stop <name>"; tunnel_stop "$1" ;;
+    url)     [ -n "${1:-}" ] || die "usage: omniserv tunnel url <name>"; tunnel_url "$1" ;;
+    status|list) tunnel_list ;;
+    *) die "usage: omniserv tunnel {install|start <name>|stop <name>|url <name>|list}" ;;
+  esac
+}
+
+# ── start-at-login (plain LaunchAgent, launched via `open` = no code-sign kill) ──
+# SMAppService attaches a LightWeight Code Requirement tied to the app's signature;
+# for an ad-hoc-signed app that goes stale on every update → "spawn failed". A plain
+# ~/Library/LaunchAgents plist that runs `/usr/bin/open` has no LWCR and just works.
+loginitem_plist(){ echo "$HOME/Library/LaunchAgents/com.emon.omniserv.login.plist"; }
+loginitem_label(){ echo "com.emon.omniserv.login"; }
+loginitem_enabled(){ [ -f "$(loginitem_plist)" ]; }
+
+cmd_loginitem(){
+  local sub="${1:-status}" uid pl label
+  uid="$(id -u)"; pl="$(loginitem_plist)"; label="$(loginitem_label)"
+  case "$sub" in
+    enable)
+      mkdir -p "$HOME/Library/LaunchAgents"
+      cat > "$pl" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$label</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/open</string>
+    <string>-a</string>
+    <string>/Applications/OmniServ.app</string>
+    <string>--args</string>
+    <string>--background</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>LimitLoadToSessionType</key><string>Aqua</string>
+</dict>
+</plist>
+PLIST
+      launchctl bootout "gui/$uid/$label" >/dev/null 2>&1 || true
+      launchctl bootstrap "gui/$uid" "$pl" >/dev/null 2>&1 || true
+      launchctl enable "gui/$uid/$label" >/dev/null 2>&1 || true
+      launchctl bootout "gui/$uid/com.emon.omniserv.helper" >/dev/null 2>&1 || true   # retire old SMAppService agent
+      ok "start-at-login enabled"
+      ;;
+    disable)
+      launchctl bootout "gui/$uid/$label" >/dev/null 2>&1 || true
+      rm -f "$pl"
+      ok "start-at-login disabled"
+      ;;
+    status) loginitem_enabled && echo enabled || echo disabled ;;
+    *) die "usage: omniserv loginitem {enable|disable|status}" ;;
+  esac
+}
+
+# Platform hook: ensure any OS-level plumbing a running Mailpit needs exists (Linux overrides
+# this to install its systemd unit for pre-existing installs). No-op on macOS (brew handles it).
+mailpit_platform_setup(){ :; }
+
+# Platform hook: return the php key that phpMyAdmin/Adminer should be served with — one whose
+# PHP has the mysqli extension they require. Default (macOS) just echoes the requested key back,
+# since brew's PHP ships mysqli. Linux overrides this: a portable static 'common' build has
+# pdo_mysql + mysqlnd but NOT mysqli, so it may return a different installed php that has it (or
+# heal the requested one). Prints the key on stdout; all diagnostics go to stderr.
+db_ext_ensure(){ printf '%s\n' "$(php_key "${1:-default}")"; }
+
+# Best-effort trusted HTTPS for a built-in tool domain (phpMyAdmin / Adminer / Mailpit) so it
+# works over https out of the box. Silent no-op when mkcert isn't installed yet.
+tool_autosecure(){
+  local domain="$1"
+  svc_installed mkcert || { info "install mkcert for HTTPS on $domain (omniserv install mkcert)"; return 0; }
+  cmd_secure "$domain" >/dev/null 2>&1 && ok "secured: https://$domain" || warn "could not auto-secure $domain (run: omniserv secure $domain)"
+}
+
+cmd_mailpit(){ need_init; case "${1:-setup}" in setup) mailpit_setup ;; *) die "usage: omniserv mailpit setup" ;; esac; }
+mailpit_setup(){
+  svc_installed mailpit || die "mailpit not installed — omniserv install mailpit"
+  mailpit_platform_setup
+  brew services start mailpit >/dev/null 2>&1 || true
+  enable_svc mailpit   # keep it in the auto-start set so Start All restarts it
+  local tld; tld="$(jget tld test)"
+  render_nginx_proxy_site mailpit "mailpit.$tld" 8025
+  tool_autosecure "mailpit.$tld"   # re-renders the proxy vhost with HTTPS if mkcert is present
+  # route PHP mail() to Mailpit for every pool (sendmail_path picked up on regen)
+  local k; for k in $(fpm_keys); do render_fpm_pool "$k" >/dev/null 2>&1 || true; done
+  hdr "Mailpit ready"
+  info "URL : https://mailpit.$tld   (SMTP 127.0.0.1:1025 · UI 127.0.0.1:8025)"
+  info "PHP mail() now delivers to Mailpit (restart pools already done)"
+  maybe_reload_nginx
+}
+
+# ── api (machine-readable JSON for the GUI) ──────────────────────────────────
+json_esc(){ printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+cmd_api() {
+  need_init
+  local brewlist; brewlist="$(brew services list 2>/dev/null || true)"
+  local svcs="" first=1
+  local IFS='|'
+  while read -r key formula probe role; do
+    [ -z "$key" ] && continue
+    local installed=false running=false version=""
+    # Use svc_installed (not a bare -x on $probe) so platform overrides can disambiguate services that
+    # share a probe path — e.g. on Linux MariaDB symlinks /usr/sbin/mysqld, so MySQL vs MariaDB must be
+    # told apart by package, not by the binary. On macOS svc_installed is exactly the -x check, unchanged.
+    if svc_installed "$key"; then installed=true; version="$(probe_version "$BREW_PREFIX/$probe")"; fi
+    case "$role" in
+      # httpd was missing here — Apache always reported "stopped" even while serving,
+      # so the GUI's Start click looked like a no-op (it had actually started fine).
+      web) case "$key" in nginx) nginx_running && running=true ;; httpd) apache_running && running=true ;; openlitespeed) ols_running && running=true ;; esac ;;
+      php) fpm_running "$key" && running=true ;;
+      dns) dnsmasq_running && running=true ;;
+      # mkcert (tls) + fnm (node) + python aren't daemons — once installed they're ready, so "active".
+      tls|node|python) [ "$installed" = true ] && running=true ;;
+      *)   printf '%s\n' "$brewlist" | awk -v f="$formula" '$1==f && $2=="started"{x=1} END{exit !x}' && running=true ;;
+    esac
+    local en=false; svc_enabled "$key" && en=true
+    local row; row="$(printf '{"key":"%s","formula":"%s","role":"%s","installed":%s,"running":%s,"enabled":%s,"version":"%s"}' \
+      "$key" "$formula" "$role" "$installed" "$running" "$en" "$(json_esc "$version")")"
+    if [ "$first" = 1 ]; then svcs="$row"; first=0; else svcs="$svcs,$row"; fi
+  done < <(services)
+
+  local sites="" sfirst=1
+  shopt -s nullglob
+  for f in "$BH_HOME"/nginx/sites/*.conf "$BH_HOME"/nginx/sites/*.conf.disabled; do
+    [ -e "$f" ] || continue
+    local n dom php sec=false root enabled=true
+    case "$f" in *.conf.disabled) enabled=false; n="$(basename "$f" .conf.disabled)";; *) n="$(basename "$f" .conf)";; esac
+    dom="$(awk '/server_name/{print $2; exit}' "$f" | tr -d ';')"
+    php="$(sed -n 's/.*php=\([^[:space:]]*\).*/\1/p' "$f" | head -1)"
+    root="$(vhost_root_read "$f")"
+    grep -q "ssl_certificate " "$f" && sec=true
+    local srv; srv="$(vhost_server "$f")"
+    local tun=""; tunnel_running "$n" && tun="$(tunnel_url "$n")"
+    local nx=""; [ "$srv" = node ] && nx="$(node_api_fields "$n")"
+    [ "$srv" = python ] && nx="$(py_api_fields "$n")"
+    # Built-in web tools (phpMyAdmin / Adminer / Mailpit) live as vhosts too, but they aren't
+    # user websites — the GUI hides them from the Sites tab + dashboard list (managed from
+    # Services / dashboard web-tools instead).
+    local tool=false; case "$n" in phpmyadmin|adminer|mailpit) tool=true;; esac
+    local aliases="" afirst=1 a
+    while read -r a; do
+      [ -n "$a" ] || continue
+      if [ "$afirst" = 1 ]; then aliases="\"$(json_esc "$a")\""; afirst=0; else aliases="$aliases,\"$(json_esc "$a")\""; fi
+    done < <(vhost_aliases "$f" "$dom")
+    local row; row="$(printf '{"name":"%s","domain":"%s","aliases":[%s],"php":"%s","root":"%s","secure":%s,"enabled":%s,"server":"%s","tunnel":"%s","tool":%s%s}' \
+      "$n" "$dom" "$aliases" "$php" "$(json_esc "$root")" "$sec" "$enabled" "$srv" "$(json_esc "$tun")" "$tool" "$nx")"
+    if [ "$sfirst" = 1 ]; then sites="$row"; sfirst=0; else sites="$sites,$row"; fi
+  done
+
+  local helper=false; helper_installed && helper=true
+  local brew=false; [ -n "$BREW" ] && brew=true
+  local cf=false; cloudflared_installed && cf=true
+  local li=false; loginitem_enabled && li=true
+  printf '{"config":%s,"services":[%s],"sites":[%s],"helper":%s,"brew":%s,"cloudflared":%s,"loginitem":%s}\n' "$(config_dump)" "$svcs" "$sites" "$helper" "$brew" "$cf" "$li"
+}
+
+# Install the core stack in one go (after Homebrew exists). Used by GUI onboarding.
+cmd_bootstrap(){
+  [ -n "$BREW" ] || die "Homebrew required first — install from https://brew.sh"
+  cmd_init
+  hdr "Installing core services"
+  cmd_install nginx php@8.4 mariadb mkcert dnsmasq mailpit
+  ok "core stack installed — add a site, then 'omniserv dns' + Start All"
+}
+
+# ── doctor / status ─────────────────────────────────────────────────────────
+cmd_doctor() {
+  hdr "OmniServ doctor — environment"
+  [ -n "$BREW" ] && ok "Homebrew: $(brew --version | head -1)  (prefix $BREW_PREFIX)" || no "Homebrew NOT found — install from https://brew.sh"
+  if xcode-select -p >/dev/null 2>&1; then ok "Xcode CLT: $(xcode-select -p)"; else warn "Xcode/CLT not found (only needed to build the GUI app)"; fi
+  [ -d "$BH_HOME" ] && ok "config root: $BH_HOME" || warn "not initialized — run: omniserv init"
+
+  hdr "Engines (installed via Homebrew)"
+  local IFS='|'
+  while read -r key formula probe role; do
+    [ -z "$key" ] && continue
+    local bin="$BREW_PREFIX/$probe"
+    if [ -x "$bin" ]; then
+      ok "$(printf '%-14s' "$key") ${c_dim}$(probe_version "$bin")${c_reset}"
+    else
+      no "$(printf '%-14s' "$key") ${c_dim}not installed (omniserv install $key)${c_reset}"
+    fi
+  done < <(services)
+
+  hdr "Ports & coexistence"
+  for p in 80 443; do
+    if lsof -nP -iTCP:"$p" -sTCP:LISTEN >/dev/null 2>&1; then warn "port $p is in use (likely ServBay/another server) — free it before OmniServ binds it"; else ok "port $p is free"; fi
+  done
+  pgrep -lf -i servbay >/dev/null 2>&1 && warn "ServBay is running — stop it before starting OmniServ web/DNS (you chose: own 80/443/.test)" || ok "ServBay not running"
+  printf "\n${c_dim}Next: omniserv init · install <svc> · site add <name> · secure <name>.test · dns · start${c_reset}\n"
+}
+
+cmd_status() {
+  hdr "OmniServ status"
+  if [ -f "$BH_HOME/config/omniserv.json" ]; then config_dump; else echo "  not initialized (run: omniserv init)"; return; fi
+  hdr "Running"
+  nginx_running && ok "nginx (pid $(cat "$BH_HOME/run/nginx.pid"))" || info "nginx stopped"
+  for k in $(fpm_keys); do
+    local pid; pid="$BH_HOME/run/php-$(php_label "$k").pid"
+    if [ -f "$pid" ] && pid_alive "$(cat "$pid")"; then ok "php-fpm $k (pid $(cat "$pid"))"; else info "php-fpm $k stopped"; fi
+  done
+  site_list
+}
+
+usage(){ cat <<U
+OmniServ — usage:
+  omniserv doctor                 check deps + ports + ServBay
+  omniserv init                   create ~/.omniserv config root
+  omniserv bootstrap              init + install the core stack (needs Homebrew)
+  omniserv install <svc|all>      brew install a service
+  omniserv update <svc|all>       brew upgrade a service
+  omniserv uninstall <svc>        brew uninstall a service
+  omniserv site add <name> [--php 8.4] [--root path] [--server nginx|apache] [--type wordpress|php|laravel|others]
+  omniserv site list|rm <name>
+  omniserv site php <name> <ver>  switch a site's PHP version
+  omniserv db {list|create|drop|passwd} [name] [--engine mysql|pg] [--password PW]
+  omniserv node {list|remote|install|use|uninstall} [version]   (multi-version via fnm)
+  omniserv nodesite add <name> --fe-dir <path> --fe-port <n> [--fe-cmd <cmd>] [--be-dir <path> --be-port <n> --be-cmd <cmd>]
+  omniserv nodesite {list|start|stop|restart|status|rm|npm} <name>   (managed Node frontend + optional backend)
+  omniserv pysite add <name> --dir <path> --port <n> [--cmd "<run command>"] [--venv yes|no] [--python 3.13]
+  omniserv pysite {list|start|stop|restart|status|rm|pip} <name>   (managed Python web app: Flask/Django/FastAPI/…)
+  omniserv php {ioncube [version|all]|status|ini {path|reload} <ver>}   (ionCube + status + edit php.ini)
+  omniserv site server <name> <nginx|apache>                   (switch a site's web server)
+  omniserv pma install                                          (phpMyAdmin at phpmyadmin.test, 2GB uploads)
+  omniserv adminer install                                      (Adminer at adminer.test)
+  omniserv mailpit setup                                        (Mailpit catcher at mailpit.test; routes PHP mail())
+  omniserv secure <domain>        trusted HTTPS via mkcert
+  omniserv dns                    set up *.test (dnsmasq + resolver)
+  omniserv config {show|set <key> <value>}   (http_port/https_port/tld/sites_root/default_php/default_web)
+  omniserv logs [file.log|--list] [lines]
+  omniserv start|stop|restart <svc|all>
+  omniserv enable|disable <svc>                 (mark a service for auto-start)
+  omniserv helper {install|uninstall|status}   (password-less nginx control)
+  omniserv status
+U
+}
+
+# ── Platform delta layer ──────────────────────────────────────────────────────
+# On Linux, source apt/systemd overrides (OmniServ for Linux). macOS is untouched.
+if [ "$(uname)" = "Linux" ]; then
+  # readlink -f so an installed /usr/bin/omniserv symlink still finds platform-linux.sh
+  # next to the REAL engine file (e.g. /usr/lib/omniserv/engine/).
+  _bh_self="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+  _bh_engine_dir="$(cd "$(dirname "$_bh_self")" && pwd)"
+  [ -f "$_bh_engine_dir/platform-linux.sh" ] && . "$_bh_engine_dir/platform-linux.sh"
+fi
+
+case "${1:-doctor}" in
+  init)    cmd_init ;;
+  doctor)  cmd_doctor ;;
+  status)  cmd_status ;;
+  api)     cmd_api ;;
+  bootstrap) cmd_bootstrap ;;
+  install) shift; cmd_install "$@" ;;
+  update)  shift; cmd_update "$@" ;;
+  uninstall) shift; cmd_uninstall "$@" ;;
+  site)    shift; cmd_site "$@" ;;
+  db)      shift; cmd_db "$@" ;;
+  node)    shift; cmd_node "$@" ;;
+  nodesite) shift; cmd_nodesite "$@" ;;
+  pysite) shift; cmd_pysite "$@" ;;
+  php)     shift; cmd_php "$@" ;;
+  pma)     shift; cmd_pma "$@" ;;
+  adminer) shift; cmd_adminer "$@" ;;
+  mailpit) shift; cmd_mailpit "$@" ;;
+  tunnel)  shift; cmd_tunnel "$@" ;;
+  loginitem) shift; cmd_loginitem "$@" ;;
+  config)  shift; cmd_config "$@" ;;
+  logs)    shift; cmd_logs "$@" ;;
+  secure)   shift; cmd_secure "$@" ;;
+  unsecure) shift; cmd_unsecure "$@" ;;
+  resecure) shift; cmd_resecure "$@" ;;
+  dns)     shift; cmd_dns "$@" ;;
+  start)   shift; cmd_start "$@" ;;
+  stop)    shift; cmd_stop "$@" ;;
+  restart) shift; cmd_restart "$@" ;;
+  reload)  need_init; nginx_reload ;;
+  helper)  shift; cmd_helper "$@" ;;
+  enable)  shift; cmd_enable "$@" ;;
+  disable) shift; cmd_disable "$@" ;;
+  help|-h|--help) usage ;;
+  *) usage; exit 1 ;;
+esac

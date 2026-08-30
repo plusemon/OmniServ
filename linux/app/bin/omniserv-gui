@@ -1,0 +1,11 @@
+#!/bin/bash
+# OmniServ GUI launcher — runs the PyGObject app from whichever layout it's installed in
+# (repo: linux/app/omniserv; .deb: /usr/lib/omniserv/app/omniserv; AppImage: /opt/omniserv/app).
+set -e
+DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+APPDIR=""
+for d in "$DIR/.." "/usr/lib/omniserv/app" "/opt/omniserv/app" "$DIR"; do
+  if [ -d "$d/omniserv" ]; then APPDIR="$(cd "$d" && pwd)"; break; fi
+done
+[ -n "$APPDIR" ] || { echo "OmniServ: app package not found" >&2; exit 1; }
+exec python3 -B -c "import sys; sys.path.insert(0, '$APPDIR'); from omniserv.app import main; sys.exit(main())" "$@"

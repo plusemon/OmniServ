@@ -1,0 +1,250 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading.Tasks;
+using OmniServ.App.Services;
+using OmniServ.Core;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Navigation;
+
+namespace OmniServ.App.Views;
+
+public sealed class DbRow
+{
+    public required string Name { get; init; }
+    public required bool IsMysql { get; init; }
+    public required string Engine { get; init; }   // real engine name: MariaDB / MySQL / PostgreSQL
+    public string Key => (IsMysql ? "my:" : "pg:") + Name;
+    public Visibility MysqlVis => IsMysql ? Visibility.Visible : Visibility.Collapsed;
+}
+
+public sealed partial class DatabasesPage : Page
+{
+    private static readonly string[] PageSizes = { "10", "15", "20", "50", "100", "All" };
+    private List<DbRow> _allRows = new();   // unfiltered, unpaged
+    private int _dbPage;                     // current page (0-based)
+    private bool _pagingReady;
+
+    public DatabasesPage()
+    {
+        InitializeComponent();
+        foreach (var p in PageSizes) DbPageSizeBox.Items.Add(new ComboBoxItem { Content = p });
+        var saved = Config.Load().DatabasesPageSize;
+        var idx = Array.IndexOf(PageSizes, saved >= 100000 ? "All" : saved.ToString());
+        DbPageSizeBox.SelectedIndex = idx >= 0 ? idx : 1;   // default 15
+        _pagingReady = true;
+    }
+
+    protected override void OnNavigatedTo(NavigationEventArgs e) => Refresh();
+
+    private string _startEngine = "mariadb";
+
+    // ── search + pagination (mirrors the Sites list) ──────────────────────────────
+    private int DbPageSize()
+    {
+        var v = (DbPageSizeBox.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "15";
+        return v == "All" ? int.MaxValue : (int.TryParse(v, out var n) ? n : 15);
+    }
+
+    private void RenderDbs()
+    {
+        var q = (DbSearchBox.Text ?? "").Trim();
+        var filtered = q.Length == 0
+            ? _allRows
+            : _allRows.Where(r => r.Name.Contains(q, StringComparison.OrdinalIgnoreCase)
+                               || r.Engine.Contains(q, StringComparison.OrdinalIgnoreCase)).ToList();
+
+        var size = DbPageSize();
+        var pages = Math.Max(1, (int)Math.Ceiling(filtered.Count / (double)size));
+        _dbPage = Math.Clamp(_dbPage, 0, pages - 1);
+        var page = filtered.Skip(_dbPage * size).Take(size).ToList();
+
+        DbList.ItemsSource = page;
+        EmptyDbs.Text = _allRows.Count == 0 ? "No databases yet." : "No matches.";
+        EmptyDbs.Visibility = page.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+
+        DbPager.Visibility = pages > 1 ? Visibility.Visible : Visibility.Collapsed;
+        DbPageLabel.Text = $"Page {_dbPage + 1} of {pages}";
+        DbPrevBtn.IsEnabled = _dbPage > 0;
+        DbNextBtn.IsEnabled = _dbPage < pages - 1;
+    }
+
+    private void DbSearch_Changed(object s, TextChangedEventArgs e) { _dbPage = 0; if (_pagingReady) RenderDbs(); }
+    private void DbPageSize_Changed(object s, SelectionChangedEventArgs e)
+    {
+        if (!_pagingReady) return;
+        var cfg = Config.Load();
+        var v = (DbPageSizeBox.SelectedItem as ComboBoxItem)?.Content?.ToString();
+        cfg.DatabasesPageSize = v == "All" ? 100000 : (int.TryParse(v, out var n) ? n : 15);
+        cfg.Save();
+        _dbPage = 0; RenderDbs();
+    }
+    private void DbPrev_Click(object s, RoutedEventArgs e) { _dbPage--; RenderDbs(); }
+    private void DbNext_Click(object s, RoutedEventArgs e) { _dbPage++; RenderDbs(); }
+
+    private async void Refresh()
+    {
+        var snap = await Task.Run(() => (
+            myRunning: DbServer.Running(),
+            myEngine:  DbServer.ActiveEngine(),                  // "mysql"/"mariadb"/null
+            mariadbInstalled: Tools.MariadbInstalled,
+            mysqlInstalled:   Tools.MysqlInstalled,
+            mariadbVer: Tools.DbVersionFor("mariadb"),
+            mysqlVer:   Tools.DbVersionFor("mysql"),
+            myDbs:     DbServer.Running() ? Database.List().ToList() : new List<string>(),
+            pgInstalled: Tools.PostgresExe() is not null,
+            pgRunning: PgServer.Running(),
+            pgDbs:     PgServer.Running() ? PgDatabase.List().ToList() : new List<string>()));
+
+        var sqlInstalled = snap.mariadbInstalled || snap.mysqlInstalled;
+        var sqlEngineName = snap.myEngine == "mariadb" ? "MariaDB" : "MySQL";
+
+        // Row label = the REAL engine (the active one when running; the installed one(s) otherwise).
+        DbEngineLabel.Text =
+            snap.myRunning ? $"{sqlEngineName} {(snap.myEngine == "mariadb" ? snap.mariadbVer : snap.mysqlVer)}".Trim()
+            : snap.mariadbInstalled && snap.mysqlInstalled ? "MySQL / MariaDB"
+            : snap.mariadbInstalled ? $"MariaDB {snap.mariadbVer}".Trim()
+            : snap.mysqlInstalled ? $"MySQL {snap.mysqlVer}".Trim()
+            : "MySQL / MariaDB";
+
+        _startEngine = snap.mariadbInstalled ? "mariadb" : "mysql";   // prefer MariaDB when present
+
+        var hasRootPw = Config.Load().RootPassword.Length > 0;
+        RootPwStatus.Text = !sqlInstalled ? "not installed"
+            : snap.myRunning ? (hasRootPw ? "running · root password set" : "running · no password") : "stopped";
+        StartDbBtn.IsEnabled = sqlInstalled && !snap.myRunning;
+        StopDbBtn.IsEnabled = snap.myRunning;
+
+        PgStatus.Text = !snap.pgInstalled ? "not installed" : snap.pgRunning ? "running" : "stopped";
+        InstallPgBtn.Visibility = snap.pgInstalled ? Visibility.Collapsed : Visibility.Visible;
+        StartPgBtn.IsEnabled = snap.pgInstalled && !snap.pgRunning;
+        StopPgBtn.IsEnabled = snap.pgRunning;
+
+        // Create: only an engine that's actually RUNNING can accept a new database.
+        var engines = new List<string>();
+        if (snap.myRunning) engines.Add(sqlEngineName);
+        if (snap.pgRunning) engines.Add("PostgreSQL");
+        var prev = (EngineBox.SelectedItem as ComboBoxItem)?.Content?.ToString();
+        EngineBox.Items.Clear();
+        foreach (var en in engines) EngineBox.Items.Add(new ComboBoxItem { Content = en });
+        if (engines.Count > 0) EngineBox.SelectedIndex = Math.Max(0, engines.IndexOf(prev ?? ""));
+        CreateBtn.IsEnabled = engines.Count > 0;
+        NameBox.IsEnabled = engines.Count > 0;
+        UpdatePassVis();
+
+        var rows = snap.myDbs.Select(d => new DbRow { Name = d, IsMysql = true, Engine = sqlEngineName })
+            .Concat(snap.pgDbs.Select(d => new DbRow { Name = d, IsMysql = false, Engine = "PostgreSQL" })).ToList();
+        _allRows = rows;
+        RenderDbs();
+    }
+
+    private void UpdatePassVis()
+    {
+        var pg = IsPgSelected;
+        PassBox.Visibility = pg ? Visibility.Collapsed : Visibility.Visible;
+        GenBtn.Visibility  = pg ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private void Engine_Changed(object s, SelectionChangedEventArgs e) => UpdatePassVis();
+
+    private async void StartDb_Click(object s, RoutedEventArgs e) => await Op(() => EngineHost.Instance.Engine.Start(_startEngine));
+    private async void StopDb_Click(object s, RoutedEventArgs e)  => await Op(() => EngineHost.Instance.Engine.Stop("mariadb"));
+    private async void StartPg_Click(object s, RoutedEventArgs e) => await Op(() => EngineHost.Instance.Engine.Start("postgresql"));
+    private async void StopPg_Click(object s, RoutedEventArgs e)  => await Op(() => EngineHost.Instance.Engine.Stop("postgresql"));
+    private async void InstallPg_Click(object s, RoutedEventArgs e) => await Op(() => EngineHost.Instance.Engine.Install("postgresql"));
+
+    private bool IsPgSelected => (EngineBox.SelectedItem as ComboBoxItem)?.Content?.ToString() == "PostgreSQL";
+
+    private async void Create_Click(object s, RoutedEventArgs e)
+    {
+        var name = NameBox.Text.Trim();
+        if (name.Length == 0) return;
+        if (IsPgSelected)
+        {
+            await Op(() => EngineHost.Instance.Engine.Pg("create", name));
+        }
+        else
+        {
+            var pw = PassBox.Text;
+            await Op(() => EngineHost.Instance.Engine.Db("create", pw.Length > 0 ? new[] { name, pw } : new[] { name }));
+        }
+        NameBox.Text = ""; PassBox.Text = "";
+    }
+
+    private async void Drop_Click(object s, RoutedEventArgs e)
+    {
+        if ((s as Button)?.Tag is not string key) return;
+        var isMy = key.StartsWith("my:");
+        var name = key[3..];
+        var dlg = new ContentDialog
+        {
+            Title = "Drop database", Content = $"Permanently drop '{name}' ({(isMy ? "MySQL" : "PostgreSQL")})? This cannot be undone.",
+            PrimaryButtonText = "Drop", CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Close, XamlRoot = this.XamlRoot,
+        };
+        if (await dlg.ShowAsync() == ContentDialogResult.Primary)
+            await Op(() => { if (isMy) EngineHost.Instance.Engine.Db("drop", name); else EngineHost.Instance.Engine.Pg("drop", name); });
+    }
+
+    private static string GenPassword(int len = 16)
+    {
+        const string chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
+        var bytes = System.Security.Cryptography.RandomNumberGenerator.GetBytes(len);
+        return new string(bytes.Select(b => chars[b % chars.Length]).ToArray());
+    }
+
+    private void GenPw_Click(object s, RoutedEventArgs e) => PassBox.Text = GenPassword();
+
+    private async void RootPw_Click(object s, RoutedEventArgs e)
+    {
+        var box = new TextBox { Header = "New root password (leave blank to remove)", Width = 300, Text = Config.Load().RootPassword };
+        var gen = new Button { Content = "Generate" };
+        gen.Click += (_, _) => box.Text = GenPassword();
+        var panel = new StackPanel { Spacing = 8, MinWidth = 320 };
+        panel.Children.Add(box); panel.Children.Add(gen);
+        panel.Children.Add(new TextBlock { Text = "Changes the MySQL root password OmniServ uses everywhere (new WordPress sites + phpMyAdmin). Local-dev only.", Opacity = 0.6, FontSize = 12, TextWrapping = TextWrapping.Wrap });
+        var dlg = new ContentDialog { Title = "Root password", Content = panel, PrimaryButtonText = "Apply", CloseButtonText = "Cancel", DefaultButton = ContentDialogButton.Primary, XamlRoot = this.XamlRoot };
+        if (await dlg.ShowAsync() != ContentDialogResult.Primary) return;
+        var pw = box.Text;
+        await Op(() => EngineHost.Instance.Engine.Db("rootpw", pw));
+    }
+
+    private async void DbPassword_Click(object s, RoutedEventArgs e)
+    {
+        if ((s as Button)?.Tag is not string name) return;
+        var box = new TextBox { Header = $"Password for a dedicated user '{name}' (@localhost + @127.0.0.1)", Width = 320 };
+        var gen = new Button { Content = "Generate" };
+        gen.Click += (_, _) => box.Text = GenPassword();
+        var panel = new StackPanel { Spacing = 8, MinWidth = 340 };
+        panel.Children.Add(box); panel.Children.Add(gen);
+        var dlg = new ContentDialog { Title = $"Set password · {name}", Content = panel, PrimaryButtonText = "Set", CloseButtonText = "Cancel", DefaultButton = ContentDialogButton.Primary, XamlRoot = this.XamlRoot };
+        if (await dlg.ShowAsync() != ContentDialogResult.Primary) return;
+        var pw = box.Text;
+        if (pw.Length == 0) return;
+        await Op(() => EngineHost.Instance.Engine.Db("passwd", name, pw));
+    }
+
+    private async void Pma_Click(object s, RoutedEventArgs e)     => await Tool(() => EngineHost.Instance.Engine.PhpMyAdmin(), "http://phpmyadmin." + Tld());
+    private async void Adminer_Click(object s, RoutedEventArgs e) => await Tool(() => EngineHost.Instance.Engine.Adminer(),   "http://adminer." + Tld());
+    private async void Mailpit_Click(object s, RoutedEventArgs e) => await Tool(() => EngineHost.Instance.Engine.Mailpit(),   "http://127.0.0.1:8025");
+
+    private static string Tld() => Config.Load().Tld;
+
+    private async Task Tool(Action action, string url)
+    {
+        Busy.IsActive = true;
+        await EngineHost.Instance.Run(action);
+        Busy.IsActive = false;
+        try { Process.Start(new ProcessStartInfo { FileName = url, UseShellExecute = true }); } catch { }
+    }
+
+    private async Task Op(Action action)
+    {
+        Busy.IsActive = true;
+        await EngineHost.Instance.Run(action);
+        Busy.IsActive = false;
+        Refresh();
+    }
+}

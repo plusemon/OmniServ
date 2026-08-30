@@ -1,0 +1,91 @@
+/* OmniServ brand — blue #0d6efd (matches Windows/Mac). libadwaita 1.5 has no public
+   accent-color API, so we override its named accent colors + key widgets directly.
+   GTK CSS uses @define-color (not CSS :root variables). */
+
+@define-color accent_bg_color #0d6efd;
+@define-color accent_fg_color #ffffff;
+@define-color accent_color #0d6efd;
+
+button.suggested-action,
+.bh-accent {
+  background-color: #0d6efd;
+  color: #ffffff;
+}
+button.suggested-action:hover { background-color: #0b5ed7; }
+
+/* sidebar brand header */
+.bh-brand { font-weight: 800; font-size: 16px; }
+.bh-brand-dot { color: #0d6efd; }
+/* the two nav lists shouldn't paint their own card background inside the sidebar */
+.bh-sidebar list.navigation-sidebar { background: transparent; }
+
+/* running/stopped dots */
+.dot-on  { color: #2ec27e; }   /* green */
+.dot-off { color: #9aa0a6; }   /* grey  */
+
+/* auto-start (favourite) toggle: clearly blue + white star when active — parity with the
+   Windows Services page (grey/flat when off; solid brand-blue when on). */
+.bh-star:checked {
+  background-color: #0d6efd;
+  background-image: none;
+  color: #ffffff;
+  box-shadow: none;
+}
+.bh-star:checked image { color: #ffffff; }
+.bh-star:checked:hover  { background-color: #0b5ed7; }
+.bh-star:checked:active { background-color: #0a53be; }
+
+/* add-site result dialog — colour-coded step lines (✓ green / ✗ red / ! amber) */
+.bh-step-ok   { color: #1a7f4f; }
+.bh-step-err  { color: #c01c28; }
+.bh-step-warn { color: #b45309; }
+
+/* small status pills */
+.bh-pill {
+  font-size: 11px; font-weight: 700;
+  padding: 1px 9px; border-radius: 999px;
+}
+.bh-pill-on   { background: rgba(46,194,126,.18); color: #1a7f4f; }
+.bh-pill-off  { background: rgba(154,160,166,.20); color: #6b7280; }
+.bh-pill-blue { background: rgba(13,110,253,.16);  color: #0a58ca; }
+.bh-pill-warn { background: rgba(245,158,11,.18);  color: #b45309; }
+
+/* dashboard metric cards */
+.bh-metric { padding: 14px 16px; }
+.bh-metric .bh-metric-val { font-size: 20px; font-weight: 600; }
+.bh-metric .bh-metric-cap { font-size: 12px; }
+
+.bh-hero {
+  background: linear-gradient(135deg, #0d6efd, #6610f2);
+  color: #ffffff;
+  border-radius: 16px;
+  padding: 20px 24px;
+}
+.bh-hero .title { font-size: 22px; font-weight: 800; }
+
+/* aaPanel-style site config dialog */
+.bh-config-sidebar {
+  background: transparent;
+  min-width: 175px;
+}
+.bh-config-sidebar-scroll {
+  background: rgba(0, 0, 0, 0.08);
+}
+.bh-config-card {
+  padding: 16px 18px;
+}
+.bh-config-info-card {
+  background: rgba(13, 110, 253, 0.08);
+  border: 1px solid rgba(13, 110, 253, 0.2);
+  padding: 12px 14px;
+}
+.bh-config-danger-card {
+  border: 1px solid rgba(192, 28, 40, 0.35);
+  background: rgba(192, 28, 40, 0.05);
+  padding: 16px 18px;
+}
+.bh-config-editor {
+  font-family: monospace;
+  font-size: 13px;
+  padding: 10px;
+}

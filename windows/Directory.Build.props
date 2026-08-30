@@ -1,0 +1,17 @@
+﻿<Project>
+  <!-- Shared properties for all OmniServ Windows projects. This <Version> is only a
+       fallback for a raw `dotnet build`; the real release build (windows\build.ps1)
+       OVERRIDES it with -p:Version read from installer\omniserv.iss (the single source
+       of truth), so the assembly version the in-app updater reads always matches the
+       installed/released version. Keep it roughly current anyway. -->
+  <PropertyGroup>
+    <Version>1.0.35</Version>
+    <Company>Emon Khan</Company>
+    <Authors>Emon Khan</Authors>
+    <Product>OmniServ</Product>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+</Project>
