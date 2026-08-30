@@ -287,13 +287,13 @@ def run_add_site(win, nm: str, args: list[str], do_secure: bool, tld: str) -> No
 
     def after_add(rc: int, out: str) -> None:
         if rc != 0:
-            GLib.idle_add(finish, False, out)
+            finish(False, out)
         elif do_secure:
-            GLib.idle_add(status_lbl.set_label, "Securing with mkcert…")
+            status_lbl.set_label("Securing with mkcert…")
             win.engine.run_async(["secure", f"{nm}.{tld}"],
-                                 lambda rc2, out2: GLib.idle_add(finish, True, out + "\n" + out2))
+                                 lambda rc2, out2: finish(True, out + "\n" + out2))
         else:
-            GLib.idle_add(finish, True, out)
+            finish(True, out)
 
     win.engine.run_async(list(args), after_add)
 

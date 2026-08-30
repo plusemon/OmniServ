@@ -141,7 +141,13 @@ class EngineClient:
                   env: dict | None = None, force_root: bool = False) -> None:
         def worker() -> None:
             rc, out = self.run(*args, env=env, force_root=force_root)
-            GLib.idle_add(on_done, rc, out)
+            def _dispatch():
+                try:
+                    on_done(rc, out)
+                except Exception as e:  # noqa: BLE001
+                    print(f"Error in async callback for {args}: {e}")
+                return False
+            GLib.idle_add(_dispatch)
         threading.Thread(target=worker, daemon=True).start()
 
 
