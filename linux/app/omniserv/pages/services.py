@@ -12,7 +12,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
 from ..widgets import status_dot
-from ._shared import SERVICE_GROUPS, _open_editor, clean_version
+from ._shared import SERVICE_GROUPS, _open_text_editor, clean_version
 
 
 class ServicesPage(Gtk.Box):
@@ -100,6 +100,6 @@ class ServicesPage(Gtk.Box):
         rc, out = self.win.engine.run("php", "ini", "path", key.replace("php@", ""))
         path = out.strip().splitlines()[-1].strip() if out.strip() else ""
         if path and os.path.exists(path):
-            _open_editor(os.path.dirname(path)) if not shutil.which("gnome-text-editor") else subprocess.Popen(["gnome-text-editor", path])
+            _open_text_editor(path)
         else:
             self.win.toast("Couldn't resolve php.ini path")

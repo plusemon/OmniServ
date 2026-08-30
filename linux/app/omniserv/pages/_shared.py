@@ -12,7 +12,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gio, GLib, Gtk, Pango  # noqa: E402
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
 from ..widgets import pill, status_dot
 
@@ -59,12 +59,57 @@ def _open(path_or_url: str) -> None:
         subprocess.Popen(["xdg-open", path_or_url])
 
 
-def _open_editor(folder: str) -> None:
-    for ed in ("code", "codium", "cursor", "subl", "gnome-text-editor", "gedit"):
+def _open_text_editor(file_path: str) -> None:
+    """Open a file or project folder in the default system text editor (not VS Code)."""
+    target = file_path
+    if os.path.isdir(file_path):
+        for candidate in (
+            "index.php",
+            "index.html",
+            "index.htm",
+            "app.py",
+            "main.py",
+            "server.js",
+            "package.json",
+            "wp-config.php",
+            "README.md",
+        ):
+            candidate_path = os.path.join(file_path, candidate)
+            if os.path.isfile(candidate_path):
+                target = candidate_path
+                break
+
+    for ed in (
+        "gnome-text-editor",
+        "gedit",
+        "kate",
+        "kwrite",
+        "mousepad",
+        "xed",
+        "pluma",
+        "leafpad",
+        "featherpad",
+        "geany",
+    ):
         if shutil.which(ed):
-            subprocess.Popen([ed, folder])
+            subprocess.Popen([ed, target])
             return
-    _open(folder)
+
+    try:
+        app_info = Gio.AppInfo.get_default_for_type("text/plain", True)
+        if app_info:
+            uri = GLib.filename_to_uri(target, None) if "://" not in target else target
+            app_info.launch_uris([uri], None)
+            return
+    except Exception:
+        pass
+
+    _open(target)
+
+
+def _open_editor(folder: str) -> None:
+    """Always open in default text editor instead of code editor / VS Code."""
+    _open_text_editor(folder)
 
 
 def _open_terminal(folder: str) -> None:
@@ -398,8 +443,8 @@ class SiteConfigDialog(Adw.Window):
         b_folder.connect("clicked", lambda *_: _open(entry.get_text() or site.get("root", "")))
         actions_row.append(b_folder)
 
-        b_editor = Gtk.Button(label="Open in Editor", icon_name="text-editor-symbolic")
-        b_editor.connect("clicked", lambda *_: _open_editor(entry.get_text() or site.get("root", "")))
+        b_editor = Gtk.Button(label="Open in Text Editor", icon_name="text-editor-symbolic")
+        b_editor.connect("clicked", lambda *_: _open_text_editor(entry.get_text() or site.get("root", "")))
         actions_row.append(b_editor)
 
         b_term = Gtk.Button(label="Open Terminal", icon_name="utilities-terminal-symbolic")
@@ -422,17 +467,27 @@ class SiteConfigDialog(Adw.Window):
         lbl = Gtk.Label(label=f"Config: {conf_path}", xalign=0, hexpand=True, css_classes=["dim-label", "caption"], wrap=True)
         top_bar.append(lbl)
         
-        reload_btn = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Reload file")
+        reload_btn = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Reload from disk")
         top_bar.append(reload_btn)
 
-        ext_btn = Gtk.Button(label="Open in Editor", icon_name="text-editor-symbolic")
-        ext_btn.connect("clicked", lambda *_: _open_editor(conf_path))
+        ext_btn = Gtk.Button(label="Open in Text Editor", icon_name="text-editor-symbolic")
+        ext_btn.connect("clicked", lambda *_: _open_text_editor(conf_path))
         top_bar.append(ext_btn)
+
+        save_btn = Gtk.Button(label="Save", icon_name="document-save-symbolic", css_classes=["suggested-action"])
+        top_bar.append(save_btn)
         
         box.append(top_bar)
 
-        text_view = Gtk.TextView(editable=False, monospace=True, css_classes=["card", "bh-config-editor"])
+        text_view = Gtk.TextView(editable=True, monospace=True, css_classes=["card", "bh-config-editor"])
+        text_view.set_wrap_mode(Gtk.WrapMode.NONE)
+        text_view.set_top_margin(10)
+        text_view.set_bottom_margin(10)
+        text_view.set_left_margin(12)
+        text_view.set_right_margin(12)
+
         sc = Gtk.ScrolledWindow(vexpand=True, hexpand=True, min_content_height=280)
+        sc.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         sc.set_child(text_view)
         box.append(sc)
 
@@ -446,7 +501,38 @@ class SiteConfigDialog(Adw.Window):
             else:
                 text_view.get_buffer().set_text(f"# Config file not found:\n# {conf_path}")
 
+        def save_conf(*_):
+            buf = text_view.get_buffer()
+            start_iter, end_iter = buf.get_bounds()
+            content = buf.get_text(start_iter, end_iter, False)
+            try:
+                os.makedirs(os.path.dirname(conf_path), exist_ok=True)
+                with open(conf_path, "w", encoding="utf-8") as f:
+                    f.write(content)
+            except Exception as e:
+                self.win.toast(f"Error saving config: {e}")
+                return
+
+            self.win.toast("Configuration saved")
+            if srv in ("ols", "openlitespeed"):
+                self.win.run_verb(["restart", "ols"], "Restarting OpenLiteSpeed…", force_root=True)
+            elif srv == "apache":
+                self.win.run_verb(["restart", "httpd"], "Reloading Apache…")
+            else:
+                self.win.run_verb(["reload"], "Reloading nginx…")
+
+        save_btn.connect("clicked", save_conf)
         reload_btn.connect("clicked", lambda *_: load_conf())
+
+        key_ctrl = Gtk.EventControllerKey()
+        def on_key_pressed(_ctrl, keyval, _keycode, state):
+            if (state & Gdk.ModifierType.CONTROL_MASK) and keyval in (Gdk.KEY_s, Gdk.KEY_S):
+                save_conf()
+                return True
+            return False
+        key_ctrl.connect("key-pressed", on_key_pressed)
+        text_view.add_controller(key_ctrl)
+
         load_conf()
         return box
 
@@ -698,6 +784,8 @@ def build_site_row(win, s: dict) -> Adw.ActionRow:
     subtitle = " · ".join(subtitle_parts) if subtitle_parts else f"{scheme}://"
 
     row = Adw.ActionRow(title=s.get("domain", s.get("name")), subtitle=subtitle)
+    row.set_activatable(True)
+    row.connect("activated", lambda *_: SiteConfigDialog(win, s).present())
     row.add_prefix(status_dot(s.get("enabled", True)))
 
     box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6, valign=Gtk.Align.CENTER)
@@ -726,11 +814,11 @@ def build_site_row(win, s: dict) -> Adw.ActionRow:
     openb.connect("clicked", lambda *_: _open(f"{scheme}://{s['domain']}"))
     actions_group.append(openb)
 
-    # 2. Open in Code Editor
+    # 2. Open in Text Editor
     if root_path:
-        ed_btn = Gtk.Button(icon_name="text-editor-symbolic", tooltip_text="Open in code editor",
+        ed_btn = Gtk.Button(icon_name="text-editor-symbolic", tooltip_text="Open in text editor",
                             css_classes=["bh-quick-btn", "flat"])
-        ed_btn.connect("clicked", lambda *_: _open_editor(root_path))
+        ed_btn.connect("clicked", lambda *_: _open_text_editor(root_path))
         actions_group.append(ed_btn)
 
         # 3. Reveal in File Manager

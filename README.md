@@ -29,6 +29,14 @@
 | Native menu-bar app | Native WinUI app | GTK4 / libadwaita app |
 | Apple Silicon + Intel | Windows 10 / 11 | Ubuntu / Debian `.deb` |
 
+<br />
+
+<a href="#-features">
+  <img src="docs/screenshots/dashboard.png" alt="OmniServ Dashboard" width="100%" />
+</a>
+
+<br />
+
 > 🟢 **Battle-tested** — runs the author's daily dev work: WordPress, OpenCart, WHMCS, Blesta, Laravel, Next.js.
 
 </div>

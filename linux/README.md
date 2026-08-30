@@ -12,6 +12,12 @@ OpenLiteSpeed**, MariaDB / MySQL / PostgreSQL, Redis & Memcached, Node & Python 
 
 > ✅ **Stable.** Works end-to-end (verified on Ubuntu 24.04 and 26.04). Please report any issues.
 
+<br />
+
+<p align="center">
+  <img src="../docs/screenshots/dashboard.png" alt="OmniServ Linux Dashboard" width="100%" />
+</p>
+
 ---
 
 ## Install
