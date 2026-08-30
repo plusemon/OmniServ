@@ -44,7 +44,7 @@ jobs:
           ./linux/build.sh "${{ steps.ver.outputs.version }}"
 
       - name: Upload Release Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-linux
           path: linux/dist/*.deb
@@ -74,7 +74,7 @@ jobs:
           ./macos/make-dist.sh "${{ steps.ver.outputs.version }}"
 
       - name: Upload Release Artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-macos
           path: |
@@ -130,7 +130,7 @@ jobs:
           powershell -ExecutionPolicy Bypass -File windows/build.ps1 -Version "${{ steps.ver.outputs.version }}"
 
       - name: Upload Release Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-windows
           path: windows/installer/dist/*.exe
