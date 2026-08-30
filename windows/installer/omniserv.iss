@@ -58,8 +58,12 @@ Name: "addtopath"; Description: "Add the omniserv CLI to PATH"; GroupDescription
 ; with restartreplace below: Windows maps that telemetry resource DLL into UNRELATED processes
 ; (browsers etc.), which locks it and made updates fail with "DeleteFile failed; code 5". With
 ; restartreplace an in-use copy is silently replaced on the next reboot instead of erroring.
+#if FileExists("..\publish\Microsoft.WindowsAppRuntime.Insights.Resource.dll")
 Source: "..\publish\*"; DestDir: "{app}"; Excludes: "Microsoft.WindowsAppRuntime.Insights.Resource.dll"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\publish\Microsoft.WindowsAppRuntime.Insights.Resource.dll"; DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
+#else
+Source: "..\publish\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+#endif
 #ifdef Bundle
 ; Bundled server binaries (nginx/php/mysql/redis/...) so the install needs NO runtime
 ; downloads - which is what stops antivirus flagging omniserv.exe as a downloader.
