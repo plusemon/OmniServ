@@ -50,7 +50,7 @@ ln -sf /usr/lib/omniserv/app/bin/omniserv-tray "$PKG/usr/bin/omniserv-tray"
 APPID="com.emon.omniserv"
 ICONSRC="$ROOT/linux/packaging/icons"
 icon_done=0
-for s in 16 32 48 64 128 256; do
+for s in 16 32 48 64 128 256 512; do
   if [ -f "$ICONSRC/$s.png" ]; then
     d="$PKG/usr/share/icons/hicolor/${s}x${s}/apps"; mkdir -p "$d"
     cp "$ICONSRC/$s.png" "$d/$APPID.png"; icon_done=1

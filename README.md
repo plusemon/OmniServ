@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="docs/icon_1024.png" width="128" height="128" alt="OmniServ Logo" />
+
 <h1>⚡ OmniServ</h1>
 
 <p><strong>Your own free local web server — native, self-controlled, open-source.</strong></p>
