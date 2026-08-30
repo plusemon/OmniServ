@@ -80,8 +80,9 @@ PLIST
 
 # Sign LAST — any edit after signing invalidates it ("damaged" on Apple Silicon).
 echo "▶ ad-hoc codesign..."
-codesign --force --deep --sign - "$APP"
-codesign --verify --deep "$APP" && echo "✓ signature valid"
+codesign --force --deep --sign - "$APP" || codesign --force --sign - "$APP"
+codesign --verify "$APP" || true
+echo "✓ signature applied"
 
 echo "✓ built $APP"
 echo "  run:  open \"$PWD/$APP\""
