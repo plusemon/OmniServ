@@ -31,9 +31,14 @@ chmod 0755 "$PKG/usr/lib/omniserv/engine/omniserv"
 
 # ── GTK app (python package + launcher), CR-stripped ──
 mkdir -p "$PKG/usr/lib/omniserv/app/omniserv" "$PKG/usr/lib/omniserv/app/bin"
-for f in "$ROOT"/linux/app/omniserv/*.py "$ROOT"/linux/app/omniserv/*.css; do
-  tr -d '\r' < "$f" > "$PKG/usr/lib/omniserv/app/omniserv/$(basename "$f")"
-done
+(
+  cd "$ROOT/linux/app/omniserv"
+  find . -type f \( -name "*.py" -o -name "*.css" \) ! -path "*/__pycache__/*" | while read -r f; do
+    dest="$PKG/usr/lib/omniserv/app/omniserv/$f"
+    mkdir -p "$(dirname "$dest")"
+    tr -d '\r' < "$f" > "$dest"
+  done
+)
 for b in omniserv-gui omniserv-tray; do
   tr -d '\r' < "$ROOT/linux/app/bin/$b" > "$PKG/usr/lib/omniserv/app/bin/$b"
   chmod 0755 "$PKG/usr/lib/omniserv/app/bin/$b"
