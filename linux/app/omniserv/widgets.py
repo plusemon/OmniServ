@@ -35,6 +35,7 @@ class PagedList(Gtk.Box):
         empty_text: str = "Nothing here yet.",
         on_page_size_changed: Callable[[int], None] | None = None,
         scroll: bool = True,
+        extra_action: Gtk.Widget | None = None,
     ) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         self._make_row = make_row
@@ -45,19 +46,32 @@ class PagedList(Gtk.Box):
         self._all: list = []
         self._page = 0
 
-        # ── search + page-size row ──
-        top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        self.search = Gtk.SearchEntry(hexpand=True, placeholder_text="Search…")
+        # ── search + controls row ──
+        top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.search = Gtk.SearchEntry(placeholder_text="Search…")
+        self.search.set_size_request(280, -1)
+        self.search.set_hexpand(False)
         self.search.connect("search-changed", self._on_search)
         top.append(self.search)
-        top.append(Gtk.Label(label="Show", css_classes=["dim-label"]))
+
+        # Spacer between search and right controls
+        top.append(Gtk.Box(hexpand=True))
+
+        # Right-aligned controls: [ extra action (e.g. + New Site) | Show [N] ]
+        right_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8, halign=Gtk.Align.END)
+        if extra_action:
+            right_box.append(extra_action)
+            right_box.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL, margin_start=4, margin_end=4))
+
+        right_box.append(Gtk.Label(label="Show", css_classes=["dim-label"]))
         self.size_dd = Gtk.DropDown.new_from_strings(PAGE_SIZES)
         try:
             self.size_dd.set_selected(PAGE_SIZES.index(str(page_size)))
         except ValueError:
             self.size_dd.set_selected(1)
         self.size_dd.connect("notify::selected", self._on_size_changed)
-        top.append(self.size_dd)
+        right_box.append(self.size_dd)
+        top.append(right_box)
         self.append(top)
 
         # ── the list ──
@@ -173,3 +187,16 @@ def pill(text: str, css: str) -> Gtk.Label:
     lbl = Gtk.Label(label=text, css_classes=["bh-pill", css])
     lbl.set_valign(Gtk.Align.CENTER)
     return lbl
+
+
+def status_pill(running: bool, missing: bool = False, label: str | None = None) -> Gtk.Label:
+    if missing:
+        css = "bh-pill-warn"
+        text = label or "● Missing"
+    elif running:
+        css = "bh-pill-on"
+        text = label or "● Running"
+    else:
+        css = "bh-pill-off"
+        text = label or "● Stopped"
+    return pill(text, css)

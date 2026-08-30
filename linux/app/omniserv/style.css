@@ -6,25 +6,135 @@
 @define-color accent_fg_color #ffffff;
 @define-color accent_color #0d6efd;
 
-button.suggested-action,
-.bh-accent {
-  background-color: #0d6efd;
-  color: #ffffff;
+/* ── 1. Surface Layering & Elevation ── */
+window.background,
+.background {
+  background-color: #121316;
+  color: #e4e7eb;
 }
-button.suggested-action:hover { background-color: #0b5ed7; }
+
+/* Sidebar surface layer */
+.bh-sidebar {
+  background-color: #16181c;
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.bh-sidebar list.navigation-sidebar {
+  background: transparent;
+  padding: 6px 0;
+}
+
+/* Sidebar navigation item & active accent indicator */
+.bh-sidebar list.navigation-sidebar row {
+  border-left: 3px solid transparent;
+  border-radius: 0 8px 8px 0;
+  margin: 2px 8px 2px 0px;
+  padding: 4px 6px;
+  transition: all 150ms ease-in-out;
+}
+
+.bh-sidebar list.navigation-sidebar row:hover:not(:selected) {
+  background-color: rgba(255, 255, 255, 0.05);
+  border-radius: 0 8px 8px 0;
+}
+
+.bh-sidebar list.navigation-sidebar row:selected {
+  background-color: rgba(13, 110, 253, 0.14);
+  border-left: 3px solid #0d6efd;
+  border-radius: 0 8px 8px 0;
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.bh-sidebar list.navigation-sidebar row:selected image {
+  color: #0d6efd;
+}
 
 /* sidebar brand header */
 .bh-brand { font-weight: 800; font-size: 16px; }
 .bh-brand-dot { color: #0d6efd; }
-/* the two nav lists shouldn't paint their own card background inside the sidebar */
-.bh-sidebar list.navigation-sidebar { background: transparent; }
 
-/* running/stopped dots */
+/* Primary suggested action buttons */
+button.suggested-action,
+.bh-accent {
+  background-color: #0d6efd;
+  color: #ffffff;
+  border-radius: 8px;
+  font-weight: 600;
+  border: none;
+}
+button.suggested-action:hover {
+  background-color: #0b5ed7;
+}
+button.suggested-action:active {
+  background-color: #0a58ca;
+}
+
+/* ── Card & Container Elevation ── */
+.card,
+.boxed-list,
+list.boxed-list,
+.bh-metric {
+  background-color: #1a1d21;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+  transition: border-color 150ms ease, background-color 150ms ease;
+}
+
+.card:hover,
+.bh-metric:hover {
+  border-color: rgba(255, 255, 255, 0.12);
+  background-color: #20242a;
+}
+
+/* Search entry & inputs */
+searchentry,
+entry {
+  background-color: #16181c;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  color: #e4e7eb;
+}
+searchentry:focus-within,
+entry:focus-within {
+  border-color: #0d6efd;
+  box-shadow: 0 0 0 1px #0d6efd;
+}
+
+/* Running/stopped dots */
 .dot-on  { color: #2ec27e; }   /* green */
 .dot-off { color: #9aa0a6; }   /* grey  */
 
-/* auto-start (favourite) toggle: clearly blue + white star when active — parity with the
-   Windows Services page (grey/flat when off; solid brand-blue when on). */
+/* ── Status Pills & Badges ── */
+.bh-pill {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 9px;
+  border-radius: 999px;
+  letter-spacing: 0.2px;
+}
+.bh-pill-on {
+  background: rgba(46, 194, 126, 0.16);
+  color: #2ec27e;
+  border: 1px solid rgba(46, 194, 126, 0.28);
+}
+.bh-pill-off {
+  background: rgba(154, 160, 166, 0.14);
+  color: #9aa0a6;
+  border: 1px solid rgba(154, 160, 166, 0.22);
+}
+.bh-pill-warn {
+  background: rgba(245, 158, 11, 0.16);
+  color: #f59e0b;
+  border: 1px solid rgba(245, 158, 11, 0.28);
+}
+.bh-pill-blue {
+  background: rgba(13, 110, 253, 0.16);
+  color: #3b82f6;
+  border: 1px solid rgba(13, 110, 253, 0.28);
+}
+
+/* Auto-start toggle star */
 .bh-star:checked {
   background-color: #0d6efd;
   background-image: none;
@@ -35,25 +145,87 @@ button.suggested-action:hover { background-color: #0b5ed7; }
 .bh-star:checked:hover  { background-color: #0b5ed7; }
 .bh-star:checked:active { background-color: #0a53be; }
 
-/* add-site result dialog — colour-coded step lines (✓ green / ✗ red / ! amber) */
-.bh-step-ok   { color: #1a7f4f; }
-.bh-step-err  { color: #c01c28; }
-.bh-step-warn { color: #b45309; }
+/* Add-site result dialog color steps */
+.bh-step-ok   { color: #2ec27e; }
+.bh-step-err  { color: #f87171; }
+.bh-step-warn { color: #f59e0b; }
 
-/* small status pills */
-.bh-pill {
-  font-size: 11px; font-weight: 700;
-  padding: 1px 9px; border-radius: 999px;
+/* ── Dashboard Metric Cards ── */
+.bh-metric {
+  padding: 14px 16px;
 }
-.bh-pill-on   { background: rgba(46,194,126,.18); color: #1a7f4f; }
-.bh-pill-off  { background: rgba(154,160,166,.20); color: #6b7280; }
-.bh-pill-blue { background: rgba(13,110,253,.16);  color: #0a58ca; }
-.bh-pill-warn { background: rgba(245,158,11,.18);  color: #b45309; }
+.bh-metric .bh-metric-val {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+  color: #ffffff;
+}
+.bh-metric .bh-metric-cap {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
 
-/* dashboard metric cards */
-.bh-metric { padding: 14px 16px; }
-.bh-metric .bh-metric-val { font-size: 20px; font-weight: 600; }
-.bh-metric .bh-metric-cap { font-size: 12px; }
+/* Progress bar inside metric cards */
+.bh-metric progressbar trough {
+  min-height: 6px;
+  border-radius: 3px;
+  background-color: rgba(255, 255, 255, 0.08);
+  border: none;
+}
+.bh-metric progressbar progress {
+  min-height: 6px;
+  border-radius: 3px;
+  background-color: #0d6efd;
+  border: none;
+}
+
+/* ── Segmented Button Group ── */
+.bh-button-group {
+  background-color: #1a1d21;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 2px;
+}
+.bh-button-group button {
+  border-radius: 6px;
+  border: none;
+  margin: 1px;
+}
+
+/* ── Quick Action Icon Buttons ── */
+.bh-quick-btn {
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: transparent;
+  color: #9aa0a6;
+  transition: all 120ms ease-in-out;
+}
+.bh-quick-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+}
+
+/* ── Activity Console Dock ── */
+.bh-console-dock {
+  background-color: #0d0f12;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  overflow: hidden;
+}
+.bh-console-header {
+  background-color: #14171b;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  padding: 8px 14px;
+}
+.bh-console-body {
+  background-color: #0d0f12;
+  font-family: monospace;
+  font-size: 12px;
+  padding: 10px 14px;
+  line-height: 1.5;
+}
 
 .bh-hero {
   background: linear-gradient(135deg, #0d6efd, #6610f2);

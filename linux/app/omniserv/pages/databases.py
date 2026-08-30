@@ -20,17 +20,16 @@ class DatabasesPage(Gtk.Box):
         self.win = win
         self.servers = Adw.PreferencesGroup(title="Database servers")
         self.append(self.servers)
-        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        header.append(Gtk.Label(label="Databases", xalign=0, hexpand=True, css_classes=["title-4"]))
-        add = Gtk.Button(label="Create database", icon_name="list-add-symbolic", css_classes=["suggested-action"])
+        self.append(Gtk.Label(label="Databases", xalign=0, css_classes=["title-4"]))
+        add = Gtk.Button(label="Create database", icon_name="list-add-symbolic", css_classes=["suggested-action"],
+                         valign=Gtk.Align.CENTER)
         add.connect("clicked", lambda *_: self.win.create_db_dialog())
-        header.append(add)
-        self.append(header)
         self.list = PagedList(self._db_row,
                               lambda d, q: q.lower() in d.get("name", "").lower(),
                               page_size=self.win.cfg_int("databases_page_size", 15),
                               empty_text="No databases yet.",
-                              on_page_size_changed=lambda n: self.win.set_cfg("databases_page_size", n))
+                              on_page_size_changed=lambda n: self.win.set_cfg("databases_page_size", n),
+                              extra_action=add)
         self.append(self.list)
 
     def refresh(self, data: dict) -> None:

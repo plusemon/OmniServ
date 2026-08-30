@@ -690,27 +690,77 @@ class SiteConfigDialog(Adw.Window):
 
 def build_site_row(win, s: dict) -> Adw.ActionRow:
     scheme = "https" if s.get("secure") else "http"
-    row = Adw.ActionRow(title=s["domain"],
-                        subtitle=f"{s.get('php','')} · {s.get('server','nginx')} · {scheme}")
+    root_path = s.get("root", "")
+    server_type = s.get("server", "nginx")
+    php_ver = s.get("php", "")
+
+    subtitle_parts = [p for p in (php_ver, server_type, root_path) if p]
+    subtitle = " · ".join(subtitle_parts) if subtitle_parts else f"{scheme}://"
+
+    row = Adw.ActionRow(title=s.get("domain", s.get("name")), subtitle=subtitle)
     row.add_prefix(status_dot(s.get("enabled", True)))
+
     box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6, valign=Gtk.Align.CENTER)
+
+    # Clean SSL & status badges
     if s.get("secure"):
-        box.append(pill("HTTPS", "bh-pill-blue"))
+        box.append(pill("🔒 SSL Active", "bh-pill-blue"))
+    else:
+        box.append(pill("HTTP", "bh-pill-off"))
+
     if s.get("tunnel"):
-        shared = pill("SHARED", "bh-pill-warn")
-        shared.set_tooltip_text(f"Public: {s['tunnel']}")
+        shared = pill("🌐 Shared", "bh-pill-warn")
+        shared.set_tooltip_text(f"Public URL: {s['tunnel']}")
         box.append(shared)
+
     aliases = s.get("aliases") or []
     if aliases:
         box.append(pill(f"{len(aliases)} aliases", "bh-pill-warn"))
-    openb = Gtk.Button(icon_name="web-browser-symbolic", tooltip_text="Open in browser")
+
+    # Quick action button group
+    actions_group = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2, margin_start=4)
+
+    # 1. Open in Browser
+    openb = Gtk.Button(icon_name="web-browser-symbolic", tooltip_text="Open in browser",
+                       css_classes=["bh-quick-btn", "flat"])
     openb.connect("clicked", lambda *_: _open(f"{scheme}://{s['domain']}"))
-    box.append(openb)
-    cfg_btn = Gtk.Button(icon_name="view-more-symbolic", tooltip_text="Site settings")
+    actions_group.append(openb)
+
+    # 2. Open in Code Editor
+    if root_path:
+        ed_btn = Gtk.Button(icon_name="text-editor-symbolic", tooltip_text="Open in code editor",
+                            css_classes=["bh-quick-btn", "flat"])
+        ed_btn.connect("clicked", lambda *_: _open_editor(root_path))
+        actions_group.append(ed_btn)
+
+        # 3. Reveal in File Manager
+        folder_btn = Gtk.Button(icon_name="folder-symbolic", tooltip_text="Reveal in file manager",
+                                css_classes=["bh-quick-btn", "flat"])
+        folder_btn.connect("clicked", lambda *_: _open(root_path))
+        actions_group.append(folder_btn)
+
+        # 4. Open Terminal
+        term_btn = Gtk.Button(icon_name="utilities-terminal-symbolic", tooltip_text="Open terminal in root",
+                              css_classes=["bh-quick-btn", "flat"])
+        term_btn.connect("clicked", lambda *_: _open_terminal(root_path))
+        actions_group.append(term_btn)
+
+    # 5. Site Settings / Config dialog
+    cfg_btn = Gtk.Button(icon_name="view-more-symbolic", tooltip_text="Site settings",
+                         css_classes=["bh-quick-btn", "flat"])
     cfg_btn.connect("clicked", lambda *_: SiteConfigDialog(win, s).present())
-    box.append(cfg_btn)
+    actions_group.append(cfg_btn)
+
+    box.append(actions_group)
     row.add_suffix(box)
     return row
+
+
+def _set_badge(badge: Gtk.Label, text: str, css: str) -> None:
+    for c in ("bh-pill-on", "bh-pill-off", "bh-pill-warn", "bh-pill-blue"):
+        badge.remove_css_class(c)
+    badge.add_css_class(css)
+    badge.set_label(text)
 
 
 def _set_dot(img: Gtk.Image, on: bool) -> None:

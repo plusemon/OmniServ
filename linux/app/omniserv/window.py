@@ -5,12 +5,13 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 
 import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
 
 from . import __version__  # noqa: E402
 from . import dialogs as D  # noqa: E402
@@ -94,8 +95,14 @@ class MainWindow(Adw.ApplicationWindow):
         self.sidebar_toggle.connect("toggled",
                                     lambda b: self.split.set_show_sidebar(b.get_active()))
         self.content_header.pack_start(self.sidebar_toggle)
-        self.content_title = Adw.WindowTitle(title="Dashboard", subtitle="")
+        self.content_title = Adw.WindowTitle(title="", subtitle="")
         self.content_header.set_title_widget(self.content_title)
+
+        # Top bar quick search + refresh
+        search_btn = Gtk.Button(icon_name="system-search-symbolic", tooltip_text="Quick search (Ctrl+K)")
+        search_btn.connect("clicked", lambda *_: self._on_search_action())
+        self.content_header.pack_end(search_btn)
+
         refresh_btn = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Refresh")
         refresh_btn.connect("clicked", lambda *_: self.refresh())
         self.content_header.pack_end(refresh_btn)
@@ -112,6 +119,11 @@ class MainWindow(Adw.ApplicationWindow):
         split.connect("notify::show-sidebar",
                       lambda s, _p: self.sidebar_toggle.set_active(s.get_show_sidebar()))
 
+        # Keyboard shortcuts (Ctrl+K)
+        key_ctrl = Gtk.EventControllerKey()
+        key_ctrl.connect("key-pressed", self._on_key_pressed)
+        self.add_controller(key_ctrl)
+
         self.sidebar_list.select_row(self.sidebar_list.get_row_at_index(0))
         self.refresh()
         GLib.timeout_add_seconds(4, self._tick)
@@ -122,7 +134,7 @@ class MainWindow(Adw.ApplicationWindow):
     # ── navigation ──
     def _nav_row(self, key: str, label: str, icon: str) -> Gtk.ListBoxRow:
         row = Gtk.ListBoxRow()
-        b = Gtk.Box(spacing=12, margin_top=8, margin_bottom=8, margin_start=8, margin_end=8)
+        b = Gtk.Box(spacing=12, margin_top=6, margin_bottom=6, margin_start=8, margin_end=8)
         b.append(Gtk.Image.new_from_icon_name(icon))
         b.append(Gtk.Label(label=label, xalign=0))
         row.set_child(b)
@@ -140,10 +152,25 @@ class MainWindow(Adw.ApplicationWindow):
         key = row.nav_key
         self.stack.set_visible_child_name(key)
         label = next(l for k, l, _i, _c in NAV if k == key)
-        self.content_title.set_title(label)
+        # On Dashboard, leave header title clean to avoid redundancy with page title
+        self.content_title.set_title("" if key == "dashboard" else label)
         page = self.pages[key]
         if hasattr(page, "refresh") and self.last_data:
             page.refresh(self.last_data)
+
+    def _on_search_action(self) -> None:
+        key = self.stack.get_visible_child_name()
+        page = self.pages.get(key)
+        if hasattr(page, "site_list") and hasattr(page.site_list, "search"):
+            page.site_list.search.grab_focus()
+        elif hasattr(page, "list") and hasattr(page.list, "search"):
+            page.list.search.grab_focus()
+
+    def _on_key_pressed(self, _controller, keyval, _keycode, state) -> bool:
+        if (state & Gdk.ModifierType.CONTROL_MASK) and keyval in (Gdk.KEY_k, Gdk.KEY_K):
+            self._on_search_action()
+            return True
+        return False
 
     # ── api refresh loop ──
     def _tick(self) -> bool:
@@ -195,7 +222,9 @@ class MainWindow(Adw.ApplicationWindow):
         D.run_progress(self, args, title, working, ok_msg, refresh=refresh)
 
     def _applog(self, line: str) -> None:
-        self.applog.append(line)
+        now = time.strftime("%H:%M:%S")
+        entry = f"[{now}] {line}" if not line.startswith("[") else line
+        self.applog.append(entry)
         del self.applog[:-200]
 
     def toast(self, text: str) -> None:

@@ -28,16 +28,15 @@ class _AppsPage(Gtk.Box):
         self.rt_row.add_suffix(self.rt_btn)
         self.runtime.add(self.rt_row)
         self.append(self.runtime)
-        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        header.append(Gtk.Label(label=self.TITLE, xalign=0, hexpand=True, css_classes=["title-4"]))
-        add = Gtk.Button(label="Add app", icon_name="list-add-symbolic", css_classes=["suggested-action"])
+        self.append(Gtk.Label(label=self.TITLE, xalign=0, css_classes=["title-4"]))
+        add = Gtk.Button(label="Add app", icon_name="list-add-symbolic", css_classes=["suggested-action"],
+                         valign=Gtk.Align.CENTER)
         add.connect("clicked", lambda *_: self.win.add_site_dialog(default_type=self.KIND))
-        header.append(add)
-        self.append(header)
         self.list = PagedList(self._row, lambda a, q: q.lower() in a.get("name", "").lower(),
                               page_size=self.win.cfg_int("apps_page_size", 15),
                               empty_text=f"No {self.KIND} apps yet.",
-                              on_page_size_changed=lambda n: self.win.set_cfg("apps_page_size", n))
+                              on_page_size_changed=lambda n: self.win.set_cfg("apps_page_size", n),
+                              extra_action=add)
         self.append(self.list)
 
     def _apps(self):
