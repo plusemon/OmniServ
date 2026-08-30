@@ -113,20 +113,20 @@ public sealed partial class PythonPage : Page
     private void AppPrev_Click(object s, RoutedEventArgs e) { _appPage--; RenderApps(); }
     private void AppNext_Click(object s, RoutedEventArgs e) { _appPage++; RenderApps(); }
 
-    private static string Tag(object s) => (s as FrameworkElement)?.Tag as string ?? "";
+    private static string GetTag(object s) => (s as FrameworkElement)?.Tag as string ?? "";
     private static void Launch(string t) { try { Process.Start(new ProcessStartInfo { FileName = t, UseShellExecute = true }); } catch { } }
 
     private async Task AppOp(Action a) { await EngineHost.Instance.Run(a); RefreshApps(); }
 
-    private void OpenApp_Click(object s, RoutedEventArgs e)    { var u = Tag(s); if (u.Length > 0) Launch(u); }
-    private async void StartApp_Click(object s, RoutedEventArgs e)   { var n = Tag(s); await AppOp(() => EngineHost.Instance.Engine.PySiteStart(n)); }
-    private async void StopApp_Click(object s, RoutedEventArgs e)    { var n = Tag(s); await AppOp(() => EngineHost.Instance.Engine.PySiteStop(n)); }
-    private async void RestartApp_Click(object s, RoutedEventArgs e) { var n = Tag(s); await AppOp(() => EngineHost.Instance.Engine.PySiteRestart(n)); }
-    private async void RemoveApp_Click(object s, RoutedEventArgs e)  { var n = Tag(s); await AppOp(() => EngineHost.Instance.Engine.PySiteRemove(n)); }
+    private void OpenApp_Click(object s, RoutedEventArgs e)    { var u = GetTag(s); if (u.Length > 0) Launch(u); }
+    private async void StartApp_Click(object s, RoutedEventArgs e)   { var n = GetTag(s); await AppOp(() => EngineHost.Instance.Engine.PySiteStart(n)); }
+    private async void StopApp_Click(object s, RoutedEventArgs e)    { var n = GetTag(s); await AppOp(() => EngineHost.Instance.Engine.PySiteStop(n)); }
+    private async void RestartApp_Click(object s, RoutedEventArgs e) { var n = GetTag(s); await AppOp(() => EngineHost.Instance.Engine.PySiteRestart(n)); }
+    private async void RemoveApp_Click(object s, RoutedEventArgs e)  { var n = GetTag(s); await AppOp(() => EngineHost.Instance.Engine.PySiteRemove(n)); }
 
     private async void PipApp_Click(object s, RoutedEventArgs e)
     {
-        var n = Tag(s);
+        var n = GetTag(s);
         Busy.IsActive = true;
         var (_, output) = await EngineHost.Instance.RunCaptured(() => EngineHost.Instance.Engine.PySitePip(n));
         Busy.IsActive = false;
@@ -135,16 +135,16 @@ public sealed partial class PythonPage : Page
         await new ContentDialog { Title = $"pip install · {n}", Content = new ScrollViewer { Content = new TextBlock { Text = body, TextWrapping = TextWrapping.Wrap, FontFamily = new FontFamily("Consolas") }, MaxHeight = 420 }, CloseButtonText = "OK", XamlRoot = this.XamlRoot }.ShowAsync();
     }
 
-    private void FolderApp_Click(object s, RoutedEventArgs e)   { var d = PySite.DirOf(Tag(s)); if (d.Length > 0) Launch(d); }
+    private void FolderApp_Click(object s, RoutedEventArgs e)   { var d = PySite.DirOf(GetTag(s)); if (d.Length > 0) Launch(d); }
     private void LogsApp_Click(object s, RoutedEventArgs e)
     {
-        var f = System.IO.Path.Combine(Paths.Logs, $"pysite-{Tag(s)}.log");
+        var f = System.IO.Path.Combine(Paths.Logs, $"pysite-{GetTag(s)}.log");
         if (System.IO.File.Exists(f)) Launch(f); else _ = Info("Logs", "No log yet — start the app first.");
     }
 
     private void EditorApp_Click(object s, RoutedEventArgs e)
     {
-        var d = PySite.DirOf(Tag(s)); if (d.Length == 0) return;
+        var d = PySite.DirOf(GetTag(s)); if (d.Length == 0) return;
         foreach (var ed in new[] { "code.cmd", "code.exe", "cursor.cmd", "cursor.exe", "subl.exe" })
         { try { Process.Start(new ProcessStartInfo { FileName = ed, Arguments = $"\"{d}\"", UseShellExecute = true }); return; } catch { } }
         Launch(d);   // no editor found — open the folder
@@ -152,7 +152,7 @@ public sealed partial class PythonPage : Page
 
     private void TerminalApp_Click(object s, RoutedEventArgs e)
     {
-        var d = PySite.DirOf(Tag(s)); if (d.Length == 0) return;
+        var d = PySite.DirOf(GetTag(s)); if (d.Length == 0) return;
         try { Process.Start(new ProcessStartInfo { FileName = "wt.exe", Arguments = $"-d \"{d}\"", UseShellExecute = true }); return; } catch { }
         try { Process.Start(new ProcessStartInfo { FileName = "powershell.exe", Arguments = $"-NoExit -Command \"Set-Location -LiteralPath '{d.Replace("'", "''")}'\"", UseShellExecute = true }); } catch { }
     }

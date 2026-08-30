@@ -263,7 +263,7 @@ public sealed partial class MainWindow : Window
         foreach (var it in Nav.MenuItems)
             if (it is NavigationViewItem nvi && (nvi.Tag as string) == "sites") { sites = nvi; break; }
         if (sites is null) return;
-        if (Nav.SelectedItem == sites)   // already on Sites → SelectionChanged won't fire; navigate directly
+        if (ReferenceEquals(Nav.SelectedItem, sites))   // already on Sites → SelectionChanged won't fire; navigate directly
         {
             object? param = _sitesAddPending ? "add" : null; _sitesAddPending = false;
             ContentFrame.Navigate(typeof(SitesPage), param);

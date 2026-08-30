@@ -120,7 +120,7 @@ public sealed partial class SiteListControl : UserControl
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────────
-    private static string Tag(object s) => (s as FrameworkElement)?.Tag as string ?? "";
+    private static string GetTag(object s) => (s as FrameworkElement)?.Tag as string ?? "";
     private SiteRow? Row(string name) => _all.FirstOrDefault(r => r.Name == name);
     private static void Launch(string t) { try { Process.Start(new ProcessStartInfo { FileName = t, UseShellExecute = true }); } catch { } }
     private Task Info(string title, string body) =>
@@ -136,14 +136,14 @@ public sealed partial class SiteListControl : UserControl
     }
 
     // ── per-site actions ─────────────────────────────────────────────────────────
-    private void Open_Click(object s, RoutedEventArgs e)   { if (Row(Tag(s)) is { } r) Launch(r.Url); }
-    private void Folder_Click(object s, RoutedEventArgs e) { if (Row(Tag(s)) is { } r && r.Root.Length > 0) Launch(r.Root); }
+    private void Open_Click(object s, RoutedEventArgs e)   { if (Row(GetTag(s)) is { } r) Launch(r.Url); }
+    private void Folder_Click(object s, RoutedEventArgs e) { if (Row(GetTag(s)) is { } r && r.Root.Length > 0) Launch(r.Root); }
 
     /// <summary>Open the site folder in the first code editor we can find (VS Code → Cursor → Sublime →
     /// Notepad++). Falls back to opening the folder in Explorer if none is installed.</summary>
     private async void CodeEditor_Click(object s, RoutedEventArgs e)
     {
-        if (Row(Tag(s)) is not { } r || r.Root.Length == 0) return;
+        if (Row(GetTag(s)) is not { } r || r.Root.Length == 0) return;
         var editor = FindEditor();
         if (editor is null)
         {
@@ -158,7 +158,7 @@ public sealed partial class SiteListControl : UserControl
     /// <summary>Open a terminal at the site folder — Windows Terminal if present, else PowerShell, else cmd.</summary>
     private void Terminal_Click(object s, RoutedEventArgs e)
     {
-        if (Row(Tag(s)) is not { } r || r.Root.Length == 0) return;
+        if (Row(GetTag(s)) is not { } r || r.Root.Length == 0) return;
         try { Process.Start(new ProcessStartInfo { FileName = "wt.exe", Arguments = $"-d \"{r.Root}\"", UseShellExecute = true }); return; } catch { }
         try { Process.Start(new ProcessStartInfo { FileName = "powershell.exe", Arguments = $"-NoExit -Command \"Set-Location -LiteralPath '{r.Root.Replace("'", "''")}'\"", UseShellExecute = true }); return; } catch { }
         try { Process.Start(new ProcessStartInfo { FileName = "cmd.exe", Arguments = $"/K cd /d \"{r.Root}\"", UseShellExecute = true }); } catch { }
@@ -197,13 +197,13 @@ public sealed partial class SiteListControl : UserControl
     }
     private void Logs_Click(object s, RoutedEventArgs e)
     {
-        var p = System.IO.Path.Combine(Paths.Logs, $"{Tag(s)}-error.log");
+        var p = System.IO.Path.Combine(Paths.Logs, $"{GetTag(s)}-error.log");
         if (System.IO.File.Exists(p)) Launch(p);
     }
 
     private async void Toggle_Click(object s, RoutedEventArgs e)
     {
-        if (Row(Tag(s)) is { } r) await Op(() => EngineHost.Instance.Engine.SiteEnable(r.Name, !r.Enabled));
+        if (Row(GetTag(s)) is { } r) await Op(() => EngineHost.Instance.Engine.SiteEnable(r.Name, !r.Enabled));
     }
 
     private async void Secure_Click(object s, RoutedEventArgs e)
@@ -233,7 +233,7 @@ public sealed partial class SiteListControl : UserControl
 
     private async void Subdomains_Click(object s, RoutedEventArgs e)
     {
-        var name = Tag(s);
+        var name = GetTag(s);
         var row = Row(name);
         if (row is null) return;
 
@@ -295,7 +295,7 @@ public sealed partial class SiteListControl : UserControl
 
     private async void Share_Click(object s, RoutedEventArgs e)
     {
-        var name = Tag(s);
+        var name = GetTag(s);
         // Start the tunnel (if it isn't already live), showing the busy ring while cloudflared connects.
         // The FIRST share auto-downloads cloudflared (no command needed), so this can take a few extra
         // seconds; on failure we surface the engine's real output instead of a generic message.
@@ -395,7 +395,7 @@ public sealed partial class SiteListControl : UserControl
 
     private async void ChangePhp_Click(object s, RoutedEventArgs e)
     {
-        var name = Tag(s);
+        var name = GetTag(s);
         var combo = new ComboBox { Width = 140 };
         foreach (var v in OmniServ.Core.Services.PhpVersions) combo.Items.Add(v);
         combo.SelectedIndex = 0;
@@ -410,18 +410,18 @@ public sealed partial class SiteListControl : UserControl
 
     private async void ChangeRoot_Click(object s, RoutedEventArgs e)
     {
-        var name = Tag(s);
+        var name = GetTag(s);
         var path = await Picker.FolderAsync();
         if (string.IsNullOrEmpty(path)) return;
         await Op(() => EngineHost.Instance.Engine.SiteRoot(name, path));
     }
 
-    private async void Nginx_Click(object s, RoutedEventArgs e)  { var n = Tag(s); await Op(() => EngineHost.Instance.Engine.SiteServer(n, "nginx")); }
-    private async void Apache_Click(object s, RoutedEventArgs e) { var n = Tag(s); await Op(() => EngineHost.Instance.Engine.SiteServer(n, "apache")); }
+    private async void Nginx_Click(object s, RoutedEventArgs e)  { var n = GetTag(s); await Op(() => EngineHost.Instance.Engine.SiteServer(n, "nginx")); }
+    private async void Apache_Click(object s, RoutedEventArgs e) { var n = GetTag(s); await Op(() => EngineHost.Instance.Engine.SiteServer(n, "apache")); }
 
     private async void Remove_Click(object s, RoutedEventArgs e)
     {
-        var name = Tag(s);
+        var name = GetTag(s);
         (string root, string db) t;
         try { t = EngineHost.Instance.Engine.SiteTargets(name); } catch { t = ("", name); }
 
