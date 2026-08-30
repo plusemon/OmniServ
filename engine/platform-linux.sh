@@ -183,13 +183,14 @@ _static_php_install(){
      && bin="$(find "$tmp" -type f -name 'php-fpm' | head -1)" && [ -n "$bin" ]; then
     $SUDO mkdir -p "$sysdir"
     $SUDO install -m 0755 "$bin" "$sysdir/php-fpm"
+    $SUDO rm -f "/usr/sbin/php-fpm$v" 2>/dev/null || true
     $SUDO ln -sf "$sysdir/php-fpm" "/usr/sbin/php-fpm$v"
     rm -rf "$tmp"; ok "PHP $v installed (portable · $file)"; return 0
   fi
   rm -rf "$tmp"; no "portable PHP $v download/extract failed"; return 1
 }
-# True when php-fpm<v> is a portable static build (symlink into our lib dir), not a distro package.
-_is_static_php(){ local l="/usr/sbin/php-fpm$1"; [ -L "$l" ] && readlink -f "$l" 2>/dev/null | grep -q "/usr/local/lib/omniserv/php/"; }
+# True when php-fpm<v> is a portable static build (symlink into our lib dir) or legacy/broken symlink, not a distro package.
+_is_static_php(){ local l="/usr/sbin/php-fpm$1"; [ -L "$l" ] && { readlink "$l" 2>/dev/null | grep -qE "/usr/local/lib/(omniserv|bhserve)/php/" || [ ! -e "$l" ]; }; }
 
 # ── apt helpers ──────────────────────────────────────────────────────────────
 # Privileged runner (SUDO is set above: "" when already root via pkexec/sudo, else "sudo").
@@ -280,6 +281,9 @@ cmd_install() {
       php@*)
         v="${key#php@}"; _ensure_php_repo
         hdr "Installing $key"
+        # If /usr/sbin/php-fpm$v is a broken/stale symlink (from static PHP or old install),
+        # remove it so dpkg/apt can unpack the native package without ENOENT / conflicts.
+        [ -L "/usr/sbin/php-fpm$v" ] && $SUDO rm -f "/usr/sbin/php-fpm$v" 2>/dev/null || true
         # Hybrid: prefer the DISTRO/Ondřej package (native, apt-managed extensions, ionCube-capable).
         # Core + WordPress-essential extensions are required; the rest are best-effort (one at a time)
         # so a package not built for this release doesn't fail the whole install.
@@ -594,18 +598,46 @@ brew_svc_running(){
 cmd_doctor() {
   hdr "OmniServ doctor  (Linux / apt)"
   command -v apt-get >/dev/null && ok "apt: $(apt-get --version | head -1)" || no "apt-get not found"
-  systemctl is-system-running >/dev/null 2>&1 && ok "systemd is running" || warn "systemd not the init system (some features need it)"
+  if [ -d /run/systemd/system ]; then
+    local s; s="$(systemctl is-system-running 2>/dev/null || true)"; [ -z "$s" ] && s="running"
+    case "$s" in
+      running) ok "systemd is running" ;;
+      degraded|starting|initializing) ok "systemd is running ($s)" ;;
+      *) warn "systemd state: $s (some features need systemd)" ;;
+    esac
+  else
+    warn "systemd not the init system (some features need it)"
+  fi
   hdr "Installed services"
-  local key _f _p _r
+  local key _f _p _r installed_any=0
   while IFS='|' read -r key _f _p _r; do
     [ -n "$key" ] || continue
-    svc_installed "$key" && ok "$key  ($(probe_version "/$(svc_probe "$key")" 2>/dev/null || echo installed))" || true
+    if svc_installed "$key"; then
+      ok "$key  (${c_dim}$(probe_version "/$(svc_probe "$key")" 2>/dev/null || echo installed)${c_reset})"
+      installed_any=1
+    fi
   done < <(services)
-  hdr "Port / daemon conflicts"
+  [ "$installed_any" = 1 ] || warn "no services installed yet (run: omniserv install <service>)"
+  hdr "Ports & coexistence"
   local p
-  for p in 80 443 3306 53; do
+  for p in 80 443; do
     if ss -ltnH "( sport = :$p )" 2>/dev/null | grep -q .; then
-      info "something is listening on :$p"
+      if nginx_running; then
+        ok "port :$p in use by OmniServ (nginx)"
+      elif apache_running; then
+        ok "port :$p in use by OmniServ (apache)"
+      elif ols_running 2>/dev/null; then
+        ok "port :$p in use by OmniServ (openlitespeed)"
+      else
+        warn "port :$p is in use by another process — free it before OmniServ web starts"
+      fi
+    else
+      ok "port :$p is free"
+    fi
+  done
+  for p in 3306; do
+    if ss -ltnH "( sport = :$p )" 2>/dev/null | grep -q .; then
+      info "port :$p is in use (database service active)"
     fi
   done
   systemctl is-enabled --quiet nginx 2>/dev/null   && warn "the distro 'nginx' unit is enabled — OmniServ runs its own; run: sudo systemctl disable --now nginx"
@@ -841,8 +873,8 @@ mysql_run(){
   elif [ -n "${DB_OLD_PASSWORD:-}" ] && MYSQL_PWD="$DB_OLD_PASSWORD" "$c" -u root -N -e "SELECT 1;" >/dev/null 2>&1; then MYSQL_PWD="$DB_OLD_PASSWORD" "$c" -u root "$@"
   elif [ -n "${DB_PASSWORD:-}" ] && MYSQL_PWD="$DB_PASSWORD" "$c" -u root -N -e "SELECT 1;" >/dev/null 2>&1; then MYSQL_PWD="$DB_PASSWORD" "$c" -u root "$@"
   elif [ -n "${OMNISERV_DB_PASSWORD:-}" ] && MYSQL_PWD="$OMNISERV_DB_PASSWORD" "$c" -u root -N -e "SELECT 1;" >/dev/null 2>&1; then MYSQL_PWD="$OMNISERV_DB_PASSWORD" "$c" -u root "$@"
-  elif command -v sudo >/dev/null 2>&1 && $SUDO "$c" -N -e "SELECT 1;" >/dev/null 2>&1; then $SUDO "$c" "$@"
-  elif command -v sudo >/dev/null 2>&1 && $SUDO "$c" -u root -N -e "SELECT 1;" >/dev/null 2>&1; then $SUDO "$c" -u root "$@"
+  elif command -v sudo >/dev/null 2>&1 && sudo -n "$c" -N -e "SELECT 1;" >/dev/null 2>&1; then $SUDO "$c" "$@"
+  elif command -v sudo >/dev/null 2>&1 && sudo -n "$c" -u root -N -e "SELECT 1;" >/dev/null 2>&1; then $SUDO "$c" -u root "$@"
   else return 1; fi
 }
 

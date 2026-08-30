@@ -240,9 +240,9 @@ class DashboardPage(Gtk.Box):
         self.log_view = Gtk.TextView(editable=False, monospace=True, css_classes=["bh-console-body"])
         buf = self.log_view.get_buffer()
         self.tag_time = buf.create_tag("time", foreground="#6b7280", scale=0.9)
-        self.tag_ok = buf.create_tag("ok", foreground="#2ec27e", weight=Pango.Weight.BOLD.value_nick)
-        self.tag_err = buf.create_tag("err", foreground="#f87171", weight=Pango.Weight.BOLD.value_nick)
-        self.tag_warn = buf.create_tag("warn", foreground="#f59e0b", weight=Pango.Weight.BOLD.value_nick)
+        self.tag_ok = buf.create_tag("ok", foreground="#2ec27e", weight=Pango.Weight.BOLD)
+        self.tag_err = buf.create_tag("err", foreground="#f87171", weight=Pango.Weight.BOLD)
+        self.tag_warn = buf.create_tag("warn", foreground="#f59e0b", weight=Pango.Weight.BOLD)
         self.tag_normal = buf.create_tag("normal", foreground="#e4e7eb")
 
         log_sc = Gtk.ScrolledWindow(min_content_height=140, max_content_height=260)

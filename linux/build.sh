@@ -129,6 +129,24 @@ if [ -n "$SUDO_USER" ] && [ "$SUDO_USER" != root ]; then
           "$u_home/.config/systemd/user/default.target.wants/omniserv.service" 2>/dev/null || true
   fi
 fi
+
+# Clean up obsolete bhserve paths (renamed to omniserv) and repair/remove stale symlinks
+if [ -d "/usr/local/lib/bhserve" ] && [ ! -d "/usr/local/lib/omniserv" ]; then
+  mv "/usr/local/lib/bhserve" "/usr/local/lib/omniserv" 2>/dev/null || true
+fi
+for l in /usr/sbin/php-fpm*; do
+  if [ -L "$l" ]; then
+    t="$(readlink "$l" 2>/dev/null || true)"
+    case "$t" in
+      */bhserve/php/*)
+        nt="${t/bhserve/omniserv}"
+        if [ -x "$nt" ]; then ln -sf "$nt" "$l" 2>/dev/null || true
+        elif [ ! -e "$l" ]; then rm -f "$l" 2>/dev/null || true; fi ;;
+      *)
+        if [ ! -e "$l" ]; then rm -f "$l" 2>/dev/null || true; fi ;;
+    esac
+  fi
+done
 exit 0
 POST
 chmod 0755 "$PKG/DEBIAN/postinst"
