@@ -292,18 +292,6 @@ omniserv status
 - macOS: `~/.omniserv/` · Sites: `~/OmniServ/www/`
 - Windows: `%LOCALAPPDATA%\OmniServ`
 
----
-
-## ☕ Support
-
-OmniServ is **free and open-source**. If it saved you time, a coffee goes a long way toward keeping free tools like this alive. 🙏
-
-**bKash / Nagad** (Personal · *Send Money*): **`01995329555`**
-
-ধন্যবাদ! / Thank you!
-
----
-
 <div align="center">
 
 Made with ❤️ by [Emon Khan](https://emon.bd)
