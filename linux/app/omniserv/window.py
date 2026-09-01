@@ -154,7 +154,7 @@ class MainWindow(Adw.ApplicationWindow):
         label = next(l for k, l, _i, _c in NAV if k == key)
         # Leave header title clean on pages with in-page title-1 headers to avoid redundancy
         self.content_title.set_title(
-            "" if key in ("dashboard", "services", "sites", "databases", "node", "python", "logs") else label
+            "" if key in ("dashboard", "services", "sites", "databases", "node", "python", "logs", "settings") else label
         )
         page = self.pages[key]
         if hasattr(page, "refresh") and self.last_data:
@@ -241,6 +241,9 @@ class MainWindow(Adw.ApplicationWindow):
     def about(self) -> None:
         D.about_dialog(self)
 
+    def doctor(self) -> None:
+        D.doctor_dialog(self)
+
     # ── dialog facades (delegating to dialogs module) ──
     def confirm(self, title, body, on_ok) -> None:
         D.confirm(self, title, body, on_ok)
@@ -276,5 +279,9 @@ class MainWindow(Adw.ApplicationWindow):
     def cfg_bool(self, key, default) -> bool:
         return prefs.cfg_bool(key, default)
 
+    def cfg_str(self, key, default="") -> str:
+        return prefs.cfg_str(key, default)
+
     def set_cfg(self, key, value) -> None:
         prefs.set_cfg(key, value)
+

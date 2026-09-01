@@ -848,3 +848,76 @@ def share_dialog(win, name: str, url: str) -> None:
     dlg.connect("response", lambda d, r: win.run_verb(["tunnel", "stop", name],
                 f"Stopped sharing {name}") if r == "stop" else None)
     dlg.present()
+
+
+def doctor_dialog(win) -> None:
+    """Run `omniserv doctor` asynchronously and display system diagnostics in a clean viewer."""
+    dlg = Adw.MessageDialog(
+        transient_for=win,
+        heading="System Doctor & Diagnostics",
+        body="Checking Homebrew, environment paths, services, sockets, and configuration integrity…"
+    )
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+    box.set_size_request(540, 360)
+
+    spinner = Gtk.Spinner(spinning=True, valign=Gtk.Align.CENTER, halign=Gtk.Align.CENTER)
+    spinner.set_size_request(32, 32)
+    box.append(spinner)
+
+    scroller = Gtk.ScrolledWindow(vexpand=True, hexpand=True, visible=False)
+    scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    lines_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, css_classes=["card", "bh-console-body"],
+                        margin_top=4, margin_bottom=4, margin_start=4, margin_end=4)
+    scroller.set_child(lines_box)
+    box.append(scroller)
+
+    raw_output = [""]
+
+    dlg.set_extra_child(box)
+    dlg.add_response("close", "Close")
+    dlg.add_response("copy", "Copy Output")
+    dlg.add_response("rerun", "Re-run")
+    dlg.set_response_appearance("rerun", Adw.ResponseAppearance.SUGGESTED)
+    dlg.set_default_response("close")
+
+    def run_check():
+        spinner.set_visible(True)
+        spinner.start()
+        scroller.set_visible(False)
+        while lines_box.get_first_child():
+            lines_box.remove(lines_box.get_first_child())
+
+        def on_done(rc, out):
+            spinner.stop()
+            spinner.set_visible(False)
+            scroller.set_visible(True)
+            raw_output[0] = out
+
+            cls_map = {"✓": "bh-step-ok", "✗": "bh-step-err", "!": "bh-step-warn"}
+            for line in out.splitlines():
+                t = line.strip()
+                if not t:
+                    continue
+                row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+                if t.startswith("──"):
+                    lbl = Gtk.Label(label=t.strip("─ "), xalign=0, css_classes=["bh-brand"], wrap=True)
+                elif t[0] in cls_map:
+                    lbl = Gtk.Label(label=t, xalign=0, css_classes=[cls_map[t[0]]], wrap=True)
+                else:
+                    lbl = Gtk.Label(label=t, xalign=0, css_classes=["dim-label"], wrap=True)
+                row.append(lbl)
+                lines_box.append(row)
+
+        win.engine.run_async(["doctor"], on_done)
+
+    def on_response(d, r):
+        if r == "copy":
+            if raw_output[0]:
+                copy_text(win, raw_output[0])
+        elif r == "rerun":
+            run_check()
+
+    dlg.connect("response", on_response)
+    dlg.present()
+    run_check()
+

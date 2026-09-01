@@ -33,9 +33,15 @@ def cfg_bool(key: str, default: bool) -> bool:
     return bool(val)
 
 
+def cfg_str(key: str, default: str = "") -> str:
+    val = get_gui_cfg().get(key, default)
+    return str(val) if val is not None else default
+
+
 def set_cfg(key: str, value: object) -> None:
     d = get_gui_cfg()
     d[key] = value
     os.makedirs(os.path.dirname(GUI_CFG), exist_ok=True)
     with open(GUI_CFG, "w") as f:
         json.dump(d, f, indent=2)
+

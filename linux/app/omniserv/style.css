@@ -416,3 +416,52 @@ entry:focus-within {
   font-weight: 600;
 }
 
+/* ── 4. Settings Page Modern Elements ── */
+.bh-settings-banner {
+  background: linear-gradient(135deg, rgba(13, 110, 253, 0.12) 0%, rgba(20, 23, 28, 0.8) 100%);
+  border: 1px solid rgba(13, 110, 253, 0.22);
+  border-radius: 14px;
+  padding: 16px 18px;
+}
+
+.bh-settings-chip {
+  background-color: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 6px 10px;
+  transition: all 120ms ease;
+}
+.bh-settings-chip:hover {
+  background-color: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+.bh-settings-chip-val {
+  font-weight: 700;
+  font-size: 13px;
+  color: #ffffff;
+}
+
+.bh-settings-chip-lbl {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: #9aa0a6;
+}
+
+.bh-settings-save-box {
+  background-color: rgba(13, 110, 253, 0.08);
+  border: 1px solid rgba(13, 110, 253, 0.25);
+  border-radius: 10px;
+  padding: 10px 14px;
+}
+
+.bh-settings-about-box {
+  background-color: #16181c;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 14px;
+  padding: 16px 20px;
+}
+
+

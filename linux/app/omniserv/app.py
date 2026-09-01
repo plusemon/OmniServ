@@ -12,7 +12,18 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from .engine import EngineClient  # noqa: E402
+from .prefs import cfg_str  # noqa: E402
 from .window import MainWindow  # noqa: E402
+
+
+def apply_theme(scheme_name: str) -> None:
+    sm = Adw.StyleManager.get_default()
+    if scheme_name == "dark":
+        sm.set_color_scheme(Adw.ColorScheme.FORCE_DARK)
+    elif scheme_name == "light":
+        sm.set_color_scheme(Adw.ColorScheme.FORCE_LIGHT)
+    else:
+        sm.set_color_scheme(Adw.ColorScheme.DEFAULT)
 
 
 class OmniServApp(Adw.Application):
@@ -33,11 +44,13 @@ class OmniServApp(Adw.Application):
         Adw.Application.do_startup(self)
         GLib.set_application_name("OmniServ")
         self._load_css()
+        apply_theme(cfg_str("color_scheme", "system"))
         # "quit" action the tray helper invokes over D-Bus (org.freedesktop.Application).
         act = Gio.SimpleAction.new("quit", None)
         act.connect("activate", lambda *_: self._quit_all())
         self.add_action(act)
         self._start_tray()
+
 
     def do_activate(self) -> None:
         wins = self.get_windows()          # includes a hidden (closed-to-tray) window
