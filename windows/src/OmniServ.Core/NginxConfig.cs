@@ -155,7 +155,7 @@ public static class NginxConfig
             root "{{Fwd(root)}}";
             index index.php index.html index.htm;
 
-            access_log {{home}}/logs/{{name}}-access.log;
+            access_log off;
             error_log  {{home}}/logs/{{name}}-error.log;
 
             location / { try_files $uri $uri/ /index.php?$query_string; }
@@ -189,7 +189,7 @@ public static class NginxConfig
             server_name {{ServerNames(domain, aliases)}};
             root "{{Fwd(root)}}";   # served by Apache (:{{apachePort}}); kept for tooling
 
-            access_log {{home}}/logs/{{name}}-access.log;
+            access_log off;
             error_log  {{home}}/logs/{{name}}-error.log;
 
             location / {
@@ -210,12 +210,15 @@ public static class NginxConfig
     /// <summary>Front a local HTTP service (e.g. Mailpit :8025) at a *.tld host (render_nginx_proxy_site analog).</summary>
     public static void RenderProxyVhost(string name, string domain, int port, Config cfg, IEnumerable<string>? aliases = null)
     {
+        var home = Fwd(Paths.Home);
         var conf = Path.Combine(Paths.NginxSites, $"{name}.conf");
         var body = $$"""
         # OmniServ site: {{name}}  ({{domain}})  php=- server=proxy -> 127.0.0.1:{{port}}
         server {
         {{ListenBlock(domain, cfg)}}
             server_name {{ServerNames(domain, aliases)}};
+            access_log off;
+            error_log  {{home}}/logs/{{name}}-error.log;
             location / {
                 proxy_pass http://127.0.0.1:{{port}};
                 proxy_set_header Host $host;

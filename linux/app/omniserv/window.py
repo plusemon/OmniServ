@@ -152,8 +152,10 @@ class MainWindow(Adw.ApplicationWindow):
         key = row.nav_key
         self.stack.set_visible_child_name(key)
         label = next(l for k, l, _i, _c in NAV if k == key)
-        # On Dashboard, leave header title clean to avoid redundancy with page title
-        self.content_title.set_title("" if key == "dashboard" else label)
+        # Leave header title clean on pages with in-page title-1 headers to avoid redundancy
+        self.content_title.set_title(
+            "" if key in ("dashboard", "services", "sites", "databases", "node", "python", "logs") else label
+        )
         page = self.pages[key]
         if hasattr(page, "refresh") and self.last_data:
             page.refresh(self.last_data)
@@ -161,7 +163,9 @@ class MainWindow(Adw.ApplicationWindow):
     def _on_search_action(self) -> None:
         key = self.stack.get_visible_child_name()
         page = self.pages.get(key)
-        if hasattr(page, "site_list") and hasattr(page.site_list, "search"):
+        if hasattr(page, "search_entry"):
+            page.search_entry.grab_focus()
+        elif hasattr(page, "site_list") and hasattr(page.site_list, "search"):
             page.site_list.search.grab_focus()
         elif hasattr(page, "list") and hasattr(page.list, "search"):
             page.list.search.grab_focus()

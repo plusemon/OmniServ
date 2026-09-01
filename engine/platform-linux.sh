@@ -1339,11 +1339,6 @@ errorlog $BH_HOME/logs/$name-ols-error.log {
   logLevel                WARN
   rollingSize             10M
 }
-accesslog $BH_HOME/logs/$name-ols-access.log {
-  useServer               0
-  rollingSize             10M
-  keepDays                7
-}
 
 index  {
   useServer               0
@@ -1410,7 +1405,7 @@ $(nginx_listen_block "$domain")
     server_name $domain;
     root "$root";   # served by OpenLiteSpeed (:$OLS_PORT); kept for tooling/metadata
 
-    access_log $BH_HOME/logs/$name-access.log;
+    access_log off;
     error_log  $BH_HOME/logs/$name-error.log;
 
     location / {

@@ -215,7 +215,7 @@ public static class NodeSite
         server {
         {{listen}}
             server_name {{string.Join(" ", new[] { domain }.Concat(aliases ?? Array.Empty<string>()).Where(s => !string.IsNullOrWhiteSpace(s)).Distinct(StringComparer.OrdinalIgnoreCase))}};
-            access_log {{home}}/logs/{{cfg.Name}}-access.log;
+            access_log off;
             error_log  {{home}}/logs/{{cfg.Name}}-error.log;
         {{apiBlock}}
             location / {

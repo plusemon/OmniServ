@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 APP_NAME="OmniServ"
-VERSION="${1:-${VERSION:-1.0.6}}"
+VERSION="${1:-${VERSION:-1.0.7}}"
 DIST="dist"
 APP="$DIST/$APP_NAME.app"
 
