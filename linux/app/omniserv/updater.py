@@ -141,18 +141,63 @@ def check(force: bool = False, local_ver: str = __version__) -> tuple[dict | Non
     return None, None
 
 
-def download_and_install(deb_url: str, on_log=lambda s: None) -> tuple[bool, str]:
-    """Download the .deb to a temp file and install it with pkexec apt (graphical sudo)."""
+def download_and_install(
+    deb_url: str,
+    on_log=lambda s: None,
+    on_progress=None,
+) -> tuple[bool, str]:
+    """Download the .deb to a temp file and install it with pkexec apt (graphical sudo).
+    Supports live progress reporting via on_progress(fraction: float, message: str).
+    """
     if not _is_github_host(deb_url):
         return False, "Refusing to install: update is not hosted on GitHub."
+
+    def _notify(frac: float, msg: str) -> None:
+        if on_progress:
+            try:
+                on_progress(frac, msg)
+            except Exception:
+                pass
+        if on_log:
+            try:
+                on_log(msg)
+            except Exception:
+                pass
+
     try:
-        on_log("Downloading update…")
+        _notify(0.02, "Connecting to GitHub…")
         ctx = ssl.create_default_context()
         req = urllib.request.Request(deb_url, headers={"User-Agent": "OmniServ-Linux"})
         fd, path = tempfile.mkstemp(suffix=".deb", prefix="omniserv-")
-        with urllib.request.urlopen(req, timeout=120, context=ctx) as r, os.fdopen(fd, "wb") as f:
-            f.write(r.read())
-        on_log("Installing (you may be asked for your password)…")
+        with urllib.request.urlopen(req, timeout=180, context=ctx) as r, os.fdopen(fd, "wb") as f:
+            total_hdr = r.headers.get("Content-Length")
+            total_bytes = int(total_hdr) if total_hdr and total_hdr.isdigit() else 0
+            downloaded = 0
+            chunk_size = 64 * 1024  # 64 KB
+
+            if total_bytes > 0:
+                _notify(0.05, f"Downloading package (0.0 MB of {total_bytes / (1024 * 1024):.1f} MB)…")
+            else:
+                _notify(0.05, "Downloading update package…")
+
+            while True:
+                chunk = r.read(chunk_size)
+                if not chunk:
+                    break
+                f.write(chunk)
+                downloaded += len(chunk)
+                if total_bytes > 0:
+                    # Download phase occupies 0% -> 70% of total progress
+                    frac = 0.05 + (downloaded / total_bytes) * 0.65
+                    mb_down = downloaded / (1024 * 1024)
+                    mb_tot = total_bytes / (1024 * 1024)
+                    pct = int((downloaded / total_bytes) * 100)
+                    _notify(frac, f"Downloading: {mb_down:.1f} MB / {mb_tot:.1f} MB ({pct}%)")
+                else:
+                    mb_down = downloaded / (1024 * 1024)
+                    _notify(0.35, f"Downloading: {mb_down:.1f} MB…")
+
+        _notify(0.75, "Installing package (authentication may be required)…")
         # pkexec gives a graphical prompt. Install via `dpkg -i` (upgrades in place) then
         # `apt-get -f install` to pull any new deps — NOT `apt/apt-get install ./file.deb`,
         # which fails on apt 2.9+ (Ubuntu 25.04+) with "Unsupported file … given on commandline".
@@ -162,7 +207,53 @@ def download_and_install(deb_url: str, on_log=lambda s: None) -> tuple[bool, str
             capture_output=True, text=True)
         os.unlink(path) if os.path.exists(path) else None
         if p.returncode == 0:
+            _notify(1.0, "Update installed successfully.")
             return True, "Update installed — restart OmniServ to use the new version."
         return False, (p.stderr or p.stdout or "Install failed.").strip()[:300]
     except Exception as e:  # noqa: BLE001
         return False, str(e)
+
+
+def restart_app(win=None) -> None:
+    """Relaunches the OmniServ application cleanly and terminates the current instance."""
+    import shutil
+    import sys
+
+    # Discover the best binary / script to launch
+    launcher = None
+    here = os.path.dirname(os.path.abspath(__file__))  # …/omniserv
+    candidates = [
+        os.path.join(here, "..", "bin", "omniserv-gui"),
+        "/usr/bin/omniserv-gui",
+        "/usr/lib/omniserv/app/bin/omniserv-gui",
+        "/opt/omniserv/app/bin/omniserv-gui",
+    ]
+    for c in candidates:
+        if os.path.exists(c) and os.access(c, os.X_OK):
+            launcher = os.path.abspath(c)
+            break
+    if not launcher:
+        launcher = shutil.which("omniserv-gui")
+
+    try:
+        if launcher:
+            subprocess.Popen([launcher], start_new_session=True)
+        else:
+            subprocess.Popen([sys.executable, "-m", "omniserv.app"], start_new_session=True)
+    except Exception as e:  # noqa: BLE001
+        print("OmniServ restart failed to launch new process:", e)
+
+    # Cleanly terminate running application and tray helper
+    if win is not None:
+        try:
+            app = win.get_application()
+            if app and hasattr(app, "_quit_all"):
+                app._quit_all()
+                return
+            elif app:
+                app.quit()
+                return
+        except Exception:
+            pass
+    sys.exit(0)
+

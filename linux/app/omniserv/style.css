@@ -343,3 +343,76 @@ entry:focus-within {
   padding: 10px 14px;
   transition: background-color 150ms ease;
 }
+
+/* ── 3. Updater UI Components ── */
+.bh-updater-icon-box {
+  width: 56px;
+  height: 56px;
+  min-width: 56px;
+  min-height: 56px;
+  border-radius: 16px;
+  background: rgba(13, 110, 253, 0.16);
+  border: 1px solid rgba(13, 110, 253, 0.35);
+  color: #3b82f6;
+  margin-bottom: 4px;
+}
+
+.bh-updater-icon-box image {
+  color: #3b82f6;
+}
+
+.bh-updater-version-badge {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  padding: 4px 12px;
+}
+
+.bh-updater-notes-box {
+  background-color: #14171b;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+}
+
+.bh-updater-success-badge {
+  width: 64px;
+  height: 64px;
+  min-width: 64px;
+  min-height: 64px;
+  border-radius: 20px;
+  background: rgba(46, 194, 126, 0.16);
+  border: 1px solid rgba(46, 194, 126, 0.35);
+  color: #2ec27e;
+  margin-bottom: 6px;
+}
+
+.bh-updater-success-badge image {
+  color: #2ec27e;
+}
+
+.bh-updater-error-badge {
+  width: 64px;
+  height: 64px;
+  min-width: 64px;
+  min-height: 64px;
+  border-radius: 20px;
+  background: rgba(248, 113, 113, 0.16);
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  color: #f87171;
+  margin-bottom: 6px;
+}
+
+.bh-updater-error-badge image {
+  color: #f87171;
+}
+
+.bh-updater-step-active {
+  color: #3b82f6;
+  font-weight: 600;
+}
+
+.bh-updater-step-done {
+  color: #2ec27e;
+  font-weight: 600;
+}
+

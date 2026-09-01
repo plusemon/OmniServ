@@ -109,41 +109,282 @@ def check_updates(win, force: bool = False) -> None:
     if not force and not cfg_bool("auto_update", True):
         return
 
+    if force:
+        win.toast("Checking for updates…")
+
     def worker():
         local_v = getattr(win, "app_version", None)
         rel, err = (updater.check(force=force, local_ver=local_v) if local_v
                     else updater.check(force=force))
         if rel:
-            GLib.idle_add(offer_update, win, rel)
+            GLib.idle_add(show_update_dialog, win, rel)
         elif err and force:
             GLib.idle_add(win.toast, f"Update check failed: {err}")
         elif force:
-            GLib.idle_add(win.toast, "You're on the latest version.")
+            cur = local_v or "1.0.0"
+            GLib.idle_add(win.toast, f"OmniServ is up to date (v{cur})")
     threading.Thread(target=worker, daemon=True).start()
 
 
 def offer_update(win, rel: dict) -> bool:
-    notes = (rel.get("notes") or "A new version is available.").strip()
-    dlg = Adw.MessageDialog(transient_for=win,
-                            heading=f"OmniServ {rel['version']} is available",
-                            body=notes[:400])
-    dlg.add_response("later", "Later")
-    dlg.add_response("install", "Install update")
+    """Backwards-compatible alias for show_update_dialog."""
+    return show_update_dialog(win, rel)
+
+
+def show_update_dialog(win, rel: dict) -> bool:
+    """Presents a modern, friendly update announcement dialog with release highlights."""
+    cur_v = getattr(win, "app_version", "1.0.0")
+    new_v = rel.get("version", "latest")
+    notes = (rel.get("notes") or "").strip()
+    if not notes:
+        notes = f"OmniServ {new_v} is now available with performance improvements and bug fixes."
+
+    dlg = Adw.MessageDialog(transient_for=win, heading="", body="")
+    content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14, margin_top=4, margin_bottom=4)
+    content.set_size_request(480, -1)
+
+    # Branded Header with Update Icon
+    hdr = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, halign=Gtk.Align.CENTER)
+    icon_box = Gtk.Box(halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER, css_classes=["bh-updater-icon-box"])
+    icon = Gtk.Image.new_from_icon_name("software-update-available-symbolic")
+    icon.set_pixel_size(32)
+    icon_box.append(icon)
+    hdr.append(icon_box)
+
+    title = Gtk.Label(label="Update Available", css_classes=["title-2", "bh-brand"])
+    hdr.append(title)
+
+    # Version comparison badge: [ Current: v1.0.38 → Latest: v1.0.39 ]
+    ver_box = Gtk.Box(spacing=8, halign=Gtk.Align.CENTER, css_classes=["bh-updater-version-badge"])
+    cur_lbl = Gtk.Label(label=f"Current: v{cur_v}", css_classes=["dim-label"])
+    arrow = Gtk.Image.new_from_icon_name("go-next-symbolic")
+    arrow.set_pixel_size(12)
+    new_lbl = Gtk.Label(label=f"Latest: v{new_v}", css_classes=["bh-pill-blue"])
+    ver_box.append(cur_lbl)
+    ver_box.append(arrow)
+    ver_box.append(new_lbl)
+    hdr.append(ver_box)
+    content.append(hdr)
+
+    # Release highlights & changelog
+    notes_hdr = Gtk.Label(label="What's New in this Version", xalign=0, css_classes=["heading", "dim-label"])
+    content.append(notes_hdr)
+
+    notes_scroller = Gtk.ScrolledWindow(max_content_height=200, propagate_natural_height=True)
+    notes_scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    notes_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, css_classes=["card", "bh-updater-notes-box"])
+    notes_lbl = Gtk.Label(label=notes, xalign=0, yalign=0, wrap=True, selectable=True)
+    notes_lbl.set_margin_top(12)
+    notes_lbl.set_margin_bottom(12)
+    notes_lbl.set_margin_start(14)
+    notes_lbl.set_margin_end(14)
+    notes_box.append(notes_lbl)
+    notes_scroller.set_child(notes_box)
+    content.append(notes_scroller)
+
+    dlg.set_extra_child(content)
+    dlg.add_response("later", "Remind Me Later")
+    dlg.add_response("install", "Update Now")
     dlg.set_response_appearance("install", Adw.ResponseAppearance.SUGGESTED)
-    dlg.connect("response", lambda d, r: do_update(win, rel) if r == "install" else None)
+    dlg.set_default_response("install")
+    dlg.set_close_response("later")
+
+    dlg.connect("response", lambda d, r: show_update_progress(win, rel) if r == "install" else None)
     dlg.present()
     return False
 
 
 def do_update(win, rel: dict) -> None:
-    win.spinner.start()
+    """Backwards-compatible alias for show_update_progress."""
+    show_update_progress(win, rel)
+
+
+def show_update_progress(win, rel: dict) -> None:
+    """Modal update progress dialog showing real-time download percentage and installation steps."""
+    new_v = rel.get("version", "latest")
+    deb_url = rel.get("deb_url", "")
+
+    dlg = Adw.MessageDialog(transient_for=win, heading="", body="")
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16, margin_top=6, margin_bottom=6)
+    box.set_size_request(480, -1)
+
+    # Header with icon
+    hdr = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, halign=Gtk.Align.CENTER)
+    icon_box = Gtk.Box(halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER, css_classes=["bh-updater-icon-box"])
+    icon = Gtk.Image.new_from_icon_name("software-update-available-symbolic")
+    icon.set_pixel_size(32)
+    icon_box.append(icon)
+    hdr.append(icon_box)
+
+    title = Gtk.Label(label=f"Updating to OmniServ v{new_v}", css_classes=["title-2", "bh-brand"])
+    hdr.append(title)
+    box.append(hdr)
+
+    # Progress Card
+    card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, css_classes=["card"])
+    card_inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10,
+                         margin_top=14, margin_bottom=14, margin_start=14, margin_end=14)
+
+    status_row = Gtk.Box(spacing=10)
+    spinner = Gtk.Spinner(spinning=True)
+    status_lbl = Gtk.Label(label="Connecting to update server…", xalign=0, hexpand=True, wrap=True)
+    status_row.append(spinner)
+    status_row.append(status_lbl)
+    card_inner.append(status_row)
+
+    bar = Gtk.ProgressBar(show_text=False)
+    bar.set_fraction(0.0)
+    card_inner.append(bar)
+
+    detail_lbl = Gtk.Label(label="Preparing download…", xalign=0, css_classes=["dim-label", "caption"], wrap=True)
+    card_inner.append(detail_lbl)
+
+    # Steps Checklist
+    steps_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin_top=6)
+
+    step1_box = Gtk.Box(spacing=8)
+    step1_icon = Gtk.Image.new_from_icon_name("emblem-synchronizing-symbolic")
+    step1_icon.set_pixel_size(14)
+    step1_lbl = Gtk.Label(label="1. Download update package", xalign=0, css_classes=["bh-updater-step-active"])
+    step1_box.append(step1_icon)
+    step1_box.append(step1_lbl)
+    steps_box.append(step1_box)
+
+    step2_box = Gtk.Box(spacing=8)
+    step2_icon = Gtk.Image.new_from_icon_name("media-record-symbolic")
+    step2_icon.set_pixel_size(10)
+    step2_lbl = Gtk.Label(label="2. Install package & dependencies", xalign=0, css_classes=["dim-label"])
+    step2_box.append(step2_icon)
+    step2_box.append(step2_lbl)
+    steps_box.append(step2_box)
+
+    card_inner.append(steps_box)
+    card.append(card_inner)
+    box.append(card)
+
+    dlg.set_extra_child(box)
+    dlg.add_response("cancel", "Cancel")
+    dlg.set_response_enabled("cancel", False)  # Prevent early cancel while performing system install
+
+    dlg.present()
+
+    is_installing = [False]
+
+    def on_progress_ui(fraction: float, msg: str) -> None:
+        bar.set_fraction(max(0.0, min(1.0, fraction)))
+        status_lbl.set_label(msg)
+        detail_lbl.set_label(msg)
+
+        if fraction >= 0.70 and not is_installing[0]:
+            is_installing[0] = True
+            step1_icon.set_from_icon_name("emblem-ok-symbolic")
+            step1_icon.add_css_class("bh-step-ok")
+            step1_lbl.remove_css_class("bh-updater-step-active")
+            step1_lbl.add_css_class("dim-label")
+
+            step2_icon.set_from_icon_name("emblem-synchronizing-symbolic")
+            step2_lbl.remove_css_class("dim-label")
+            step2_lbl.add_css_class("bh-updater-step-active")
 
     def worker():
         ok, msg = updater.download_and_install(
-            rel["deb_url"], lambda s: GLib.idle_add(win.toast, s))
-        GLib.idle_add(win.spinner.stop)
-        GLib.idle_add(win.toast, msg)
+            deb_url,
+            on_progress=lambda f, s: GLib.idle_add(on_progress_ui, f, s)
+        )
+        def on_done():
+            dlg.close()
+            if ok:
+                show_update_success(win, new_v)
+            else:
+                show_update_error(win, rel, msg)
+        GLib.idle_add(on_done)
+
     threading.Thread(target=worker, daemon=True).start()
+
+
+def show_update_success(win, version: str) -> None:
+    """Presents a celebratory completion dialog with an instant Restart option."""
+    dlg = Adw.MessageDialog(transient_for=win, heading="", body="")
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14, margin_top=10, margin_bottom=10)
+    box.set_size_request(460, -1)
+
+    # Success Green Badge
+    icon_box = Gtk.Box(halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER, css_classes=["bh-updater-success-badge"])
+    icon = Gtk.Image.new_from_icon_name("emblem-ok-symbolic")
+    icon.set_pixel_size(36)
+    icon_box.append(icon)
+    box.append(icon_box)
+
+    title = Gtk.Label(label="Update Installed Successfully!", css_classes=["title-2", "bh-brand"], halign=Gtk.Align.CENTER)
+    box.append(title)
+
+    desc = Gtk.Label(
+        label=f"OmniServ has been upgraded to version <b>v{version}</b>.\nRestart the application now to start using the new version.",
+        use_markup=True,
+        justify=Gtk.Justification.CENTER,
+        halign=Gtk.Align.CENTER,
+        wrap=True
+    )
+    box.append(desc)
+
+    dlg.set_extra_child(box)
+    dlg.add_response("later", "Restart Later")
+    dlg.add_response("restart", "Restart OmniServ")
+    dlg.set_response_appearance("restart", Adw.ResponseAppearance.SUGGESTED)
+    dlg.set_default_response("restart")
+    dlg.set_close_response("later")
+
+    def on_resp(d, r):
+        if r == "restart":
+            updater.restart_app(win)
+        else:
+            win.toast(f"OmniServ v{version} installed — restart when convenient")
+
+    dlg.connect("response", on_resp)
+    dlg.present()
+
+
+def show_update_error(win, rel: dict, err_msg: str) -> None:
+    """Presents a clean error dialog with full explanation and a Try Again button."""
+    dlg = Adw.MessageDialog(transient_for=win, heading="", body="")
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14, margin_top=8, margin_bottom=8)
+    box.set_size_request(460, -1)
+
+    icon_box = Gtk.Box(halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER, css_classes=["bh-updater-error-badge"])
+    icon = Gtk.Image.new_from_icon_name("dialog-error-symbolic")
+    icon.set_pixel_size(36)
+    icon_box.append(icon)
+    box.append(icon_box)
+
+    title = Gtk.Label(label="Update Failed", css_classes=["title-2", "error"], halign=Gtk.Align.CENTER)
+    box.append(title)
+
+    err_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, css_classes=["card", "bh-config-danger-card"])
+    err_card.set_margin_start(4)
+    err_card.set_margin_end(4)
+    err_lbl = Gtk.Label(
+        label=err_msg or "An error occurred during update download or installation.",
+        wrap=True,
+        selectable=True,
+        xalign=0
+    )
+    err_lbl.set_margin_top(10)
+    err_lbl.set_margin_bottom(10)
+    err_lbl.set_margin_start(12)
+    err_lbl.set_margin_end(12)
+    err_card.append(err_lbl)
+    box.append(err_card)
+
+    dlg.set_extra_child(box)
+    dlg.add_response("close", "Close")
+    dlg.add_response("retry", "Try Again")
+    dlg.set_response_appearance("retry", Adw.ResponseAppearance.SUGGESTED)
+    dlg.set_default_response("retry")
+    dlg.set_close_response("close")
+
+    dlg.connect("response", lambda d, r: show_update_progress(win, rel) if r == "retry" else None)
+    dlg.present()
+
 
 
 def about_dialog(win) -> None:
